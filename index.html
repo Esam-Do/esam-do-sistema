@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ESAM-DO 2026 | Sistema Administrativo</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-screen" class="login-screen">
+  <div class="login-card">
+    <div class="login-brand">
+      <img src="logo.png" class="brand-logo" alt="Logo Dojo" />
+      <h1>ESAM-DO 2026</h1>
+      <p>Sistema administrativo</p>
+    </div>
+
+    <div id="login-error" class="login-error hidden"></div>
+
+    <div class="form-group full">
+      <label>Correo</label>
+      <input type="email" id="loginEmail" placeholder="tu@correo.com" autocomplete="email" />
+    </div>
+
+    <div class="form-group full">
+      <label>Contraseña</label>
+      <input type="password" id="loginPassword" placeholder="••••••••" autocomplete="current-password" />
+    </div>
+
+    <button class="btn btn-primary" style="width:100%;justify-content:center" id="loginBtn" onclick="login()">
+      Ingresar
+    </button>
+  </div>
+</div>
+
+<!-- App -->
+<div class="app hidden">
+
+  <aside class="sidebar">
+    <div class="sidebar-top">
+<div class="brand">
+  <img src="logo.png" class="brand-logo" alt="Logo Dojo" />
+  <div>
+    <h1>ESAM-DO 2026</h1>
+    <p>Sistema administrativo</p>
+  </div>
+</div>
+
+      <div class="nav-label">Menú</div>
+      <nav class="sidebar-nav">
+        <button class="nav-btn active" onclick="setTab('dashboard', this)"><span class="nav-icon">◈</span> Resumen</button>
+        <button class="nav-btn" onclick="setTab('students', this)"><span class="nav-icon">◉</span> Alumnos</button>
+        <button class="nav-btn" onclick="setTab('schedules', this)"><span class="nav-icon">⊞</span> Horarios</button>
+        <button class="nav-btn" onclick="setTab('attendance', this)"><span class="nav-icon">✓</span> Asistencia</button>
+        <button class="nav-btn" onclick="setTab('payments', this)"><span class="nav-icon">◎</span> Pagos</button>
+        <button class="nav-btn" onclick="setTab('cash', this)"><span class="nav-icon">□</span> Caja</button>
+        <button class="nav-btn" onclick="setTab('inventory', this)"><span class="nav-icon">▦</span> Inventario</button>
+        <button class="nav-btn" onclick="setTab('sales', this)"><span class="nav-icon">◇</span> Ventas</button>
+        <button class="nav-btn" onclick="setTab('reports', this)"><span class="nav-icon">≡</span> Reportes</button>
+      </nav>
+    </div>
+
+    <div class="sidebar-bottom">
+      <button class="theme-btn" id="theme-toggle" onclick="toggleTheme()">
+        <span id="theme-icon">◑</span>
+        <span id="theme-label">Modo oscuro</span>
+      </button>
+
+      <button class="logout-btn" onclick="logout()">
+        <span>⏻</span> Cerrar sesión
+      </button>
+
+      <div class="clock-card">
+        <div id="clock-date">--</div>
+        <div id="clock-time">--:--:--</div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main-content">
+    <header class="topbar">
+      <div>
+        <h2 id="page-title">Resumen</h2>
+        <p id="page-subtitle">Vista general de ESAM-DO 2026</p>
+      </div>
+
+      <div class="topbar-actions">
+        <input type="text" id="search" placeholder="🔍  Buscar..." />
+        <div class="header-buttons" id="header-buttons"></div>
+      </div>
+    </header>
+
+    <div class="content-area">
+      <section id="content"></section>
+    </div>
+  </main>
+
+</div>
+
+<div id="toast-container"></div>
+
+<div class="modal-overlay hidden" id="modalOverlay" onclick="handleOverlayClick(event)">
+  <div class="modal" id="mainModal">
+    <div class="modal-header">
+      <h3 id="modalTitle">Formulario</h3>
+      <button class="icon-btn" onclick="closeModal()">✕</button>
+    </div>
+    <form id="modalForm" class="modal-form"></form>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="confirmOverlay">
+  <div class="modal confirm-modal" id="confirmModal">
+    <div class="confirm-icon" id="confirmIcon">⚠️</div>
+    <div class="confirm-title" id="confirmTitle">¿Confirmar acción?</div>
+    <div class="confirm-msg" id="confirmMsg"></div>
+    <div class="confirm-actions">
+      <button class="btn btn-secondary" onclick="closeConfirm()">Cancelar</button>
+      <button class="btn btn-danger" id="confirmOkBtn">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
