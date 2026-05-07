@@ -3713,7 +3713,7 @@ function printReportStyle() {
   return `<style>body{font-family:Arial,sans-serif;padding:32px;color:#111}h1{margin:0;font-size:22px}h2{margin:4px 0 20px;font-size:18px}h3{margin-top:24px}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0}.summary div{border:1px solid #ddd;border-radius:8px;padding:10px}.summary span{display:block;color:#666;font-size:11px;text-transform:uppercase}.summary strong{font-size:16px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border-bottom:1px solid #ddd;text-align:left;padding:8px;font-size:12px}th{background:#f5f5f5;text-transform:uppercase;font-size:10px}</style>`;
 }
 
-/* ============================================================
+/* ===========================================================
    EXPORTS
    ============================================================ */
 function exportCSV(rows, filename) {
