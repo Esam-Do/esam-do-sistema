@@ -1442,3 +1442,333 @@ button:disabled { opacity:.65; cursor:not-allowed; }
     max-height: 430px;
   }
 }
+/* ============================================================
+   AJUSTES SOLICITADOS — Inventario sin categoría, scroll y caja diaria/mensual
+   ============================================================ */
+.scroll-table {
+  max-height: 430px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.scroll-table.tall-scroll { max-height: 520px; }
+.scroll-table table { min-width: 900px; }
+.scroll-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface);
+}
+.scroll-list {
+  max-height: 520px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.cash-box-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.cash-box-split div {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 9px 10px;
+}
+.cash-box-split span {
+  display: block;
+  color: var(--text-3);
+  font-size: .68rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  margin-bottom: 3px;
+}
+.cash-box-split strong {
+  display: block;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: .98rem;
+}
+.daily-close-preview {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-soft);
+  padding: 14px;
+}
+.close-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.close-summary-grid div {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 11px 12px;
+}
+.close-summary-grid span {
+  display: block;
+  font-size: .7rem;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  margin-bottom: 4px;
+}
+.close-summary-grid strong {
+  font-family: var(--mono);
+  font-size: 1.15rem;
+  color: var(--text);
+}
+
+@media (max-width: 700px) {
+  .cash-box-split,
+  .close-summary-grid { grid-template-columns: 1fr; }
+  .scroll-table { max-height: 360px; }
+}
+
+/* ============================================================
+   MEJORAS CAJA / REPORTES / BUSCADOR
+   ============================================================ */
+.cash-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+.cash-status-card {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  display: grid;
+  gap: 6px;
+}
+.cash-status-card span:first-child {
+  color: var(--text-2);
+  font-size: .76rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.cash-status-card strong {
+  font-family: var(--mono);
+  font-size: 1.25rem;
+}
+.report-filter-card .filters-bar {
+  margin-bottom: 0;
+}
+.form-group.compact {
+  display: inline-flex;
+  min-width: 180px;
+}
+.ok-text { color: var(--success) !important; }
+.danger-text { color: var(--danger) !important; }
+.daily-close-preview .form-hint,
+.form-hint {
+  line-height: 1.4;
+}
+@media print {
+  .sidebar, .topbar, #toast-container, .modal-overlay { display:none !important; }
+  .main-content, .content-area { padding:0 !important; }
+}
+
+/* === Mejora visual: resumen de caja ordenado === */
+.cash-overview-card {
+  padding: 18px;
+}
+.cash-overview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.cash-total-pill {
+  min-width: 190px;
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--primary-soft);
+  border: 1px solid var(--primary);
+  text-align: right;
+}
+.cash-total-pill span,
+.cash-metric-label {
+  display: block;
+  font-size: .72rem;
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-bottom: 4px;
+}
+.cash-total-pill strong {
+  font-family: var(--mono);
+  font-size: 1.45rem;
+  color: var(--primary);
+  letter-spacing: -.02em;
+}
+.cash-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.cash-metric-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-soft);
+  min-height: 108px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.cash-metric-card strong {
+  font-size: 1.55rem;
+  line-height: 1.1;
+  letter-spacing: -.03em;
+  color: var(--text);
+}
+.cash-metric-card small {
+  margin-top: 6px;
+  color: var(--text-3);
+  font-size: .75rem;
+  line-height: 1.35;
+}
+.cash-metric-total {
+  background: linear-gradient(135deg, var(--primary-soft), var(--surface));
+  border-color: var(--primary);
+}
+.cash-metric-total strong { color: var(--primary); }
+.cash-metric-filter {
+  background: var(--surface);
+}
+@media (max-width: 1100px) {
+  .cash-overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 680px) {
+  .cash-overview-head { flex-direction: column; }
+  .cash-total-pill { width: 100%; text-align: left; }
+  .cash-overview-grid { grid-template-columns: 1fr; }
+}
+
+/* === Caja: resumen minimalista y compacto === */
+.cash-summary-panel {
+  padding: 16px;
+}
+.cash-summary-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.cash-grand-total {
+  min-width: 190px;
+  border: 1px solid var(--primary-border);
+  background: var(--primary-soft);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  text-align: right;
+}
+.cash-grand-total span,
+.cash-main-card span,
+.cash-branch-head span,
+.cash-branch-split span,
+.cash-branch-title {
+  display: block;
+  color: var(--text-2);
+  font-size: .68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .055em;
+}
+.cash-grand-total strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--primary);
+  font-size: 1.28rem;
+  line-height: 1.08;
+}
+.cash-main-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.cash-main-card {
+  min-height: 82px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+.cash-main-card.primary {
+  background: linear-gradient(135deg, var(--primary-soft), var(--surface));
+  border-color: var(--primary-border);
+}
+.cash-main-card strong {
+  margin-top: 3px;
+  font-size: 1.32rem;
+  line-height: 1.08;
+}
+.cash-main-card.primary strong { color: var(--primary); }
+.cash-main-card small {
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: .7rem;
+  line-height: 1.25;
+}
+.cash-branch-title {
+  margin: 2px 0 8px;
+}
+.cash-branch-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.cash-branch-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: 12px 13px;
+  box-shadow: var(--shadow-sm);
+}
+.cash-branch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.cash-branch-total {
+  font-size: 1.28rem;
+  line-height: 1.08;
+  margin-bottom: 9px;
+}
+.cash-branch-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+.cash-branch-split div {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  padding: 8px 10px;
+}
+.cash-branch-split strong {
+  display: block;
+  margin-top: 3px;
+  font-size: .92rem;
+}
+@media (max-width: 1120px) {
+  .cash-main-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 780px) {
+  .cash-summary-top { flex-direction: column; align-items: stretch; }
+  .cash-grand-total { width: 100%; text-align: left; }
+  .cash-main-grid,
+  .cash-branch-grid { grid-template-columns: 1fr; }
+}
