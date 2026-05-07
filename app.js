@@ -28,7 +28,10 @@ let inventory = [];
 let sales = [];
 let cashBoxes = [];
 let cashMovements = [];
+let dailyCashClosures = [];
 let activityLog = [];
+
+const ADMIN_CASH_CODE = "ESAM2026";
 
 const filters = {
   branchId: "all",
@@ -41,7 +44,11 @@ const filters = {
   saleMethod: "all",
   stock: "all",
   scheduleView: "week",
-  scheduleShift: "all"
+  scheduleShift: "all",
+  cashDate: getTodayIso(),
+  cashKind: "all",
+  reportDate: getTodayIso(),
+  reportMonth: getCurrentCycle(new Date())
 };
 
 const SHIFTS = ["Mañana", "Tarde", "Noche"];
@@ -57,9 +64,7 @@ const WEEK_DAYS = [
 
 const DISCIPLINE_THEMES = {
   "Karate":           { class: "disc-karate" },
-  "Kickboxing":       { class: "disc-kickboxing" },
-  "MMA":              { class: "disc-mma" },
-  "Defensa Personal": { class: "disc-defensa" }
+  "Kickboxing - MMA": { class: "disc-kickboxing" }
 };
 
 /* ============================================================
@@ -69,17 +74,24 @@ const DISCIPLINE_THEMES = {
    - Si la sede no está en este mapa, se usa el nombre original.
    ============================================================ */
 const BRANCH_DISPLAY_OVERRIDES = {
-  // claves: nombre exacto como está guardado en tu tabla `branches`
-  // valor: cómo se debe mostrar en toda la app
-  "Sede Principal": "Sede Principal (Hoyos Rubio)",
-  "Sede Centro":    "Sede Principal (Hoyos Rubio)",
-  "Sede 2":         "Sede Sucursal (Jr. Angamos)",
-  "Sede Sucursal":  "Sede Sucursal (Jr. Angamos)",
-  "Sede Norte":     "Sede Sucursal (Jr. Angamos)"
+  // Nombre visual oficial en toda la app. No cambia el valor guardado en Supabase.
+  "Sede Principal": "SEDE PRINCIPAL (Hoyos Rubio)",
+  "Sede Centro":    "SEDE PRINCIPAL (Hoyos Rubio)",
+  "Sede 1":         "SEDE PRINCIPAL (Hoyos Rubio)",
+  "Sede 2":         "SEDE SUCURSAL (Jr. Angamos)",
+  "Sede Sucursal":  "SEDE SUCURSAL (Jr. Angamos)",
+  "Sede Norte":     "SEDE SUCURSAL (Jr. Angamos)"
 };
 
+function normalizeDisciplineName(discipline) {
+  const value = String(discipline || "").trim();
+  if (["Kickboxing", "MMA", "Kickboxing/MMA", "Kickboxing - MMA"].includes(value)) return "Kickboxing - MMA";
+  if (value === "Defensa Personal") return "Kickboxing - MMA";
+  return value || "Karate";
+}
+
 function getDisciplineClass(discipline) {
-  return DISCIPLINE_THEMES[discipline]?.class || "disc-default";
+  return DISCIPLINE_THEMES[normalizeDisciplineName(discipline)]?.class || "disc-default";
 }
 
 function normalizeDayName(raw) {
@@ -125,7 +137,7 @@ const titles = {
   reports:    { title:"Reportes",   subtitle:"Indicadores financieros y operativos" }
 };
 
-const DISCIPLINES = ["Karate", "Kickboxing", "MMA", "Defensa Personal"];
+const DISCIPLINES = ["Karate", "Kickboxing - MMA"];
 const PAYMENT_METHODS = ["Efectivo", "Transferencia", "Yape", "Plin"];
 const PAYMENT_CONCEPTS = ["Matrícula", "Mensualidad", "Abono", "Otros"];
 const ATTENDANCE_STATUSES = ["presente", "falta", "tardanza", "justificado"];
@@ -249,7 +261,7 @@ async function loadInitialData() {
 
 async function refreshData() {
   const [
-    b, sc, st, at, py, inv, sl, cb, cm, logs
+    b, sc, st, at, py, inv, sl, cb, cm, closures, logs
   ] = await Promise.all([
     selectTable("branches", "*", { column:"name" }),
     selectTable("schedules", "*, branches(name)", { column:"start_time" }),
@@ -260,6 +272,7 @@ async function refreshData() {
     selectTable("sales", "*, branches(name), sale_items(*)", { column:"date", ascending:false }),
     selectTable("cash_boxes", "*, branches(name)", { column:"created_at" }),
     selectTable("cash_movements", "*, branches(name)", { column:"date", ascending:false }),
+    selectTable("daily_cash_closures", "*, branches(name)", { column:"closed_at", ascending:false }).catch(() => []),
     selectTable("activity_logs", "*", { column:"created_at", ascending:false }).catch(() => [])
   ]);
 
@@ -272,6 +285,7 @@ async function refreshData() {
   sales = sl;
   cashBoxes = cb;
   cashMovements = cm;
+  dailyCashClosures = closures;
   activityLog = logs;
 }
 
@@ -381,7 +395,7 @@ function getSchedule(id) {
 function getScheduleLabel(id) {
   const s = getSchedule(id);
   if (!s) return "Sin horario";
-  return `${s.discipline} · ${s.age_group} · ${(s.days || []).join("-")} · ${formatTime(s.start_time)}-${formatTime(s.end_time)}`;
+  return `${normalizeDisciplineName(s.discipline)} · ${s.age_group} · ${(s.days || []).join("-")} · ${formatTime(s.start_time)}-${formatTime(s.end_time)}`;
 }
 
 function getStudent(id) {
@@ -427,16 +441,107 @@ function branchOptions(selected = "") {
   return branches.map(b => `<option value="${b.id}" ${selected === b.id ? "selected" : ""}>${escape(getBranchName(b.id))}</option>`).join("");
 }
 
+function getCashKindLabel(kind) {
+  if (kind === "daily") return "Caja diaria";
+  if (kind === "monthly") return "Caja mensual";
+  return "Caja";
+}
+
+function isSameDay(value, isoDate) {
+  return String(value || "").slice(0, 10) === isoDate;
+}
+
+function isDailyCashMovement(m) {
+  // Regla final de caja:
+  // - Todo cobro/venta EN EFECTIVO del día pertenece a CAJA DIARIA.
+  // - La CAJA MENSUAL solo se usa para fondo/gastos operativos o movimientos manuales mensuales.
+  // - Si existe la columna cash_kind en Supabase, ella manda.
+  const explicitKind = String(m.cash_kind || m.kind || "").toLowerCase();
+  if (explicitKind === "daily" || explicitKind === "diaria" || explicitKind === "caja diaria") return true;
+  if (explicitKind === "monthly" || explicitKind === "mensual" || explicitKind === "caja mensual") return false;
+
+  const source = String(m.source || "").toLowerCase();
+  const category = String(m.category || "").toLowerCase();
+  const description = String(m.description || "").toLowerCase();
+  const method = String(m.payment_method || m.method || "").toLowerCase();
+
+  const text = `${source} ${category} ${description} ${method}`;
+
+  // Entradas/salidas propias de la caja diaria.
+  if (text.includes("caja diaria")) return true;
+  if (text.includes("cierre diario") || text.includes("cierre de caja diaria")) return true;
+  if (text.includes("venta") || text.includes("sale")) return true;
+  if (text.includes("pago automático") || text.includes("pago de alumno") || text.includes("payment")) return true;
+  if (text.includes("matrícula") || text.includes("matricula") || text.includes("mensualidad") || text.includes("abono")) return true;
+
+  // Si es efectivo y no es un gasto/fondo mensual explícito, lo tratamos como caja diaria.
+  if (method.includes("efectivo") && !text.includes("caja mensual") && !text.includes("fondo mensual")) return true;
+
+  return false;
+}
+
+function isMonthlyCashMovement(m) {
+  return !isDailyCashMovement(m);
+}
+
+function getCashTotals(branchId = "all", dateIso = getTodayIso()) {
+  const filtered = cashMovements.filter(m => branchId === "all" || m.branch_id === branchId);
+  const dailyToday = filtered.filter(m => isDailyCashMovement(m) && isSameDay(m.date, dateIso));
+  const monthly = filtered.filter(isMonthlyCashMovement);
+  const sum = (rows, type) => rows.filter(m => !type || m.type === type).reduce((a, m) => a + Number(m.amount || 0), 0);
+  return {
+    dailyTodayIn: sum(dailyToday, "ingreso"),
+    dailyTodayOut: sum(dailyToday, "egreso"),
+    dailyTodayBalance: sum(dailyToday, "ingreso") - sum(dailyToday, "egreso"),
+    monthlyIn: sum(monthly, "ingreso"),
+    monthlyOut: sum(monthly, "egreso"),
+    monthlyBalance: sum(monthly, "ingreso") - sum(monthly, "egreso"),
+    totalIn: sum(filtered, "ingreso"),
+    totalOut: sum(filtered, "egreso"),
+    totalBalance: sum(filtered, "ingreso") - sum(filtered, "egreso")
+  };
+}
+
+function getDailyCashBalanceForBranch(branchId, dateIso = getTodayIso()) {
+  return getCashTotals(branchId, dateIso).dailyTodayBalance;
+}
+
+
 function disciplineOptions(selected = "") {
-  return DISCIPLINES.map(d => `<option value="${d}" ${selected === d ? "selected" : ""}>${escape(d)}</option>`).join("");
+  const normalizedSelected = normalizeDisciplineName(selected);
+  return DISCIPLINES.map(d => `<option value="${d}" ${normalizedSelected === d ? "selected" : ""}>${escape(d)}</option>`).join("");
 }
 
 function scheduleOptions(selected = "", branchId = "", discipline = "") {
   let list = schedules.filter(s => s.active !== false);
   if (branchId) list = list.filter(s => s.branch_id === branchId);
-  if (discipline) list = list.filter(s => s.discipline === discipline);
-  return `<option value="">Sin horario asignado</option>` +
-    list.map(s => `<option value="${s.id}" ${selected === s.id ? "selected" : ""}>${escape(getScheduleLabel(s.id))}</option>`).join("");
+  if (discipline) list = list.filter(s => normalizeDisciplineName(s.discipline) === normalizeDisciplineName(discipline));
+
+  list.sort((a, b) => {
+    const byShift = SHIFTS.indexOf(a.shift) - SHIFTS.indexOf(b.shift);
+    if (byShift !== 0) return byShift;
+    const byTime = String(a.start_time).localeCompare(String(b.start_time));
+    if (byTime !== 0) return byTime;
+    return String(a.age_group || "").localeCompare(String(b.age_group || ""));
+  });
+
+  const grouped = list.reduce((acc, s) => {
+    const key = `${s.shift || "Sin turno"} · ${normalizeDisciplineName(s.discipline) || "Disciplina"}`;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(s);
+    return acc;
+  }, {});
+
+  const options = Object.entries(grouped).map(([label, rows]) => `
+    <optgroup label="${escape(label)}">
+      ${rows.map(s => {
+        const days = (s.days || []).map(d => normalizeDayName(d)).filter(Boolean).map(d => WEEK_DAYS.find(w => w.full === d)?.mini || d.slice(0,2)).join("-");
+        const text = `${s.age_group} · ${days} · ${formatTime(s.start_time)}-${formatTime(s.end_time)} · ${getBranchName(s.branch_id)}`;
+        return `<option value="${s.id}" ${selected === s.id ? "selected" : ""}>${escape(text)}</option>`;
+      }).join("")}
+    </optgroup>`).join("");
+
+  return `<option value="">Sin horario asignado</option>` + options;
 }
 
 function branchFilterHtml() {
@@ -553,6 +658,8 @@ function renderHeaderButtons() {
     payments:`<button class="btn btn-secondary btn-sm" onclick="exportPayments()">⬇ CSV</button>
               <button class="btn btn-primary" onclick="openPaymentModal()">+ Registrar pago</button>`,
     cash:`<button class="btn btn-secondary btn-sm" onclick="exportCash()">⬇ CSV</button>
+          <button class="btn btn-secondary btn-sm" onclick="openDailyCloseModal()">Cerrar caja</button>
+          <button class="btn btn-secondary btn-sm" onclick="openCashReopenModal()">Abrir caja</button>
           <button class="btn btn-primary" onclick="openCashMovementModal()">+ Movimiento</button>`,
     inventory:`<button class="btn btn-secondary btn-sm" onclick="openStockAdjustModal()">Ajustar stock</button>
                <button class="btn btn-primary" onclick="openProductModal()">+ Agregar producto</button>`,
@@ -764,7 +871,7 @@ function filteredStudents(search) {
 
     const searchOk = haystack.includes(search);
     const branchOk = filters.branchId === "all" || s.branch_id === filters.branchId;
-    const disciplineOk = filters.discipline === "all" || s.discipline === filters.discipline;
+    const disciplineOk = filters.discipline === "all" || normalizeDisciplineName(s.discipline) === normalizeDisciplineName(filters.discipline);
     const scheduleOk = filters.scheduleId === "all" || s.schedule_id === filters.scheduleId;
     const statusOk = filters.studentStatus === "all" || s.status === filters.studentStatus;
 
@@ -794,7 +901,7 @@ function renderStudents(content, search) {
 
   const activeChips = [];
   if (filters.branchId !== "all") activeChips.push({ key:"branchId", label:`Sede: ${getBranchName(filters.branchId)}` });
-  if (filters.discipline !== "all") activeChips.push({ key:"discipline", label:filters.discipline });
+  if (filters.discipline !== "all") activeChips.push({ key:"discipline", label:normalizeDisciplineName(filters.discipline) });
   if (filters.scheduleId !== "all") activeChips.push({ key:"scheduleId", label:`Horario: ${getScheduleLabel(filters.scheduleId)}` });
   if (filters.studentStatus !== "all") activeChips.push({ key:"studentStatus", label:`Estado: ${filters.studentStatus}` });
 
@@ -926,7 +1033,7 @@ function renderStudentRow(s) {
       </div>
       <div class="student-row-main">
         <div class="row-name">${escape(s.name)}</div>
-        <div class="row-sub">${escape(s.discipline || "—")} · ${escape(getBranchName(s.branch_id))}</div>
+        <div class="row-sub">${escape(normalizeDisciplineName(s.discipline) || "—")} · ${escape(getBranchName(s.branch_id))}</div>
       </div>
       <div class="row-code mono">${escape(s.registration_code || "—")}</div>
       <div class="row-schedule">${schedLabel}</div>
@@ -1031,7 +1138,7 @@ function openStudentDetail(id) {
             <div class="student-detail-title">Sede y plan</div>
             <div class="detail-list">
               <div><span>Sede</span><strong>${escape(getBranchName(s.branch_id))}</strong></div>
-              <div><span>Disciplina</span><strong>${escape(s.discipline || "—")}</strong></div>
+              <div><span>Disciplina</span><strong>${escape(normalizeDisciplineName(s.discipline) || "—")}</strong></div>
               <div><span>Horario</span><strong>${escape(getScheduleLabel(s.schedule_id))}</strong></div>
               <div><span>Grado / Cinturón</span><strong>${escape(s.rank || "—")}</strong></div>
             </div>
@@ -1106,10 +1213,21 @@ function closeStudentDetail() {
   document.removeEventListener("keydown", studentDetailEscHandler);
 }
 
+let studentSearchTimer = null;
 function setStudentSearch(value) {
   const searchEl = document.getElementById("search");
   if (searchEl) searchEl.value = value;
-  render();
+  clearTimeout(studentSearchTimer);
+  studentSearchTimer = setTimeout(() => {
+    render();
+    setTimeout(() => {
+      const input = document.querySelector(".students-search");
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    }, 0);
+  }, 180);
 }
 
 function toggleStudentFilters() {
@@ -1149,7 +1267,7 @@ function openStudentModal(id = null, defaults = {}) {
   const isEditing = Boolean(s);
 
   const initialBranchId = s?.branch_id || defaults.branch_id || branches[0]?.id;
-  const initialDiscipline = s?.discipline || defaults.discipline || "Karate";
+  const initialDiscipline = normalizeDisciplineName(s?.discipline || defaults.discipline || "Karate");
   const initialScheduleId = s?.schedule_id || defaults.schedule_id || "";
   const defaultSchedule = initialScheduleId ? getSchedule(initialScheduleId) : null;
   const initialMonthlyFee = s?.monthly_fee ?? defaultSchedule?.monthly_fee ?? 200;
@@ -1293,7 +1411,7 @@ async function saveStudent(e) {
     name: document.getElementById("sName").value.trim(),
     age: Number(document.getElementById("sAge").value) || null,
     phone: document.getElementById("sPhone").value.trim() || null,
-    discipline: document.getElementById("sDiscipline").value,
+    discipline: normalizeDisciplineName(document.getElementById("sDiscipline").value),
     branch_id: document.getElementById("sBranch").value,
     schedule_id: document.getElementById("sSchedule").value || null,
     rank: document.getElementById("sRank").value.trim() || null,
@@ -1404,7 +1522,7 @@ function renderSchedules(content, search) {
     const haystack = [getBranchName(s.branch_id), s.discipline, s.age_group, (s.days || []).join(" "), s.shift].join(" ").toLowerCase();
     return haystack.includes(search) &&
       filterByBranch(s) &&
-      (filters.discipline === "all" || s.discipline === filters.discipline) &&
+      (filters.discipline === "all" || normalizeDisciplineName(s.discipline) === normalizeDisciplineName(filters.discipline)) &&
       (filters.scheduleShift === "all" || s.shift === filters.scheduleShift);
   });
 
@@ -1524,12 +1642,12 @@ function renderClassBlock(s) {
     <button type="button"
       class="class-block ${getDisciplineClass(s.discipline)} occ-${state} ${inactive}"
       onclick="openScheduleAttendees('${s.id}')"
-      title="Ver alumnos de ${escape(s.discipline)} · ${escape(s.age_group)} · ${escape(getBranchName(s.branch_id))}">
+      title="Ver alumnos de ${escape(normalizeDisciplineName(s.discipline))} · ${escape(s.age_group)} · ${escape(getBranchName(s.branch_id))}">
       <div class="class-block-time mono">
         <span class="class-block-dot"></span>
         ${formatTime(s.start_time)}–${formatTime(s.end_time)}
       </div>
-      <div class="class-block-title">${escape(s.discipline)}</div>
+      <div class="class-block-title">${escape(normalizeDisciplineName(s.discipline))}</div>
       <div class="class-block-meta">${escape(s.age_group)} · ${occupancyText}</div>
     </button>
   `;
@@ -1567,7 +1685,7 @@ function renderSchedulesCards(list) {
             </div>
 
             <div class="schedule-card-headline">
-              <h4>${escape(s.discipline)} · ${escape(s.age_group)}</h4>
+              <h4>${escape(normalizeDisciplineName(s.discipline))} · ${escape(s.age_group)}</h4>
               <p>${escape(getBranchName(s.branch_id))}</p>
             </div>
 
@@ -1635,7 +1753,7 @@ function openScheduleAttendees(scheduleId) {
       <div class="attendees-header">
         <div class="attendees-header-top">
           <div class="attendees-title-block">
-            <div class="attendees-discipline">${escape(s.discipline)} · ${escape(s.age_group)}</div>
+            <div class="attendees-discipline">${escape(normalizeDisciplineName(s.discipline))} · ${escape(s.age_group)}</div>
             <div class="attendees-meta">
               <span class="mono">${formatTime(s.start_time)} – ${formatTime(s.end_time)}</span>
               ${daysLabel ? `<span>${escape(daysLabel)}</span>` : ""}
@@ -1850,7 +1968,7 @@ function openScheduleModal(id = null) {
 
     const payload = {
       branch_id: document.getElementById("hBranch").value,
-      discipline: document.getElementById("hDiscipline").value,
+      discipline: normalizeDisciplineName(document.getElementById("hDiscipline").value),
       age_group: document.getElementById("hAge").value.trim() || "General",
       days,
       shift: document.getElementById("hShift").value,
@@ -1920,7 +2038,7 @@ function confirmDeleteSchedule(id) {
 
   showConfirm(
     "Eliminar horario",
-    `Se eliminará permanentemente el horario "${sched.discipline} · ${sched.age_group} · ${formatTime(sched.start_time)}". Esta acción no se puede deshacer.`,
+    `Se eliminará permanentemente el horario "${normalizeDisciplineName(sched.discipline)} · ${sched.age_group} · ${formatTime(sched.start_time)}". Esta acción no se puede deshacer.`,
     async () => {
       await safeAction(async () => {
         const { error } = await db.from("schedules").delete().eq("id", id);
@@ -2109,14 +2227,14 @@ function renderAgendaRow(s, date) {
     <button type="button"
       class="agenda-row ${getDisciplineClass(s.discipline)} ${rowState}"
       onclick="setFilter('scheduleId', '${s.id}')"
-      title="Pasar lista de ${escape(s.discipline)} · ${escape(s.age_group)}">
+      title="Pasar lista de ${escape(normalizeDisciplineName(s.discipline))} · ${escape(s.age_group)}">
       <div class="agenda-row-time">
         <span class="agenda-dot" style="background:${dotColor}"></span>
         <span class="mono">${formatTime(s.start_time)}</span>
       </div>
       <div class="agenda-row-main">
         <div class="agenda-row-title">
-          <span>${escape(s.discipline)} · ${escape(s.age_group)}</span>
+          <span>${escape(normalizeDisciplineName(s.discipline))} · ${escape(s.age_group)}</span>
           ${inlineLabel}
         </div>
         <div class="agenda-row-sub">${escape(getBranchName(s.branch_id))}</div>
@@ -2189,7 +2307,7 @@ function renderAttendanceRoll(sched, date, search) {
         <div class="roll-header">
           <button class="btn btn-ghost btn-sm" onclick="setFilter('scheduleId','all')">← Volver</button>
           <div class="roll-title-block">
-            <div class="roll-title">${escape(sched.discipline)} · ${escape(sched.age_group)}</div>
+            <div class="roll-title">${escape(normalizeDisciplineName(sched.discipline))} · ${escape(sched.age_group)}</div>
             <div class="roll-meta">
               <span class="mono">${formatTime(sched.start_time)} – ${formatTime(sched.end_time)}</span>
               <span>${escape(getBranchName(sched.branch_id))}</span>
@@ -2387,7 +2505,7 @@ function renderPayments(content, search) {
         <div class="filters-bar">${branchFilterHtml()}</div>
 
         <div class="section-title">Historial de pagos</div>
-        <div class="table-wrapper">
+        <div class="table-wrapper scroll-table tall-scroll">
           <table>
             <thead><tr><th>Fecha</th><th>Alumno</th><th>Código</th><th>Sede</th><th>Concepto</th><th>Método</th><th>Referencia</th><th>Monto</th></tr></thead>
             <tbody>
@@ -2522,47 +2640,115 @@ async function savePayment(e) {
    CASH
    ============================================================ */
 function renderCash(content, search) {
-  const boxes = cashBoxes.filter(filterByBranch);
+  const selectedDate = filters.cashDate || getTodayIso();
+  const branchId = filters.branchId;
+  const totals = getCashTotals(branchId, selectedDate);
+  const globalTotals = getCashTotals("all", selectedDate);
+
+  const branchCashCards = branches.map(b => {
+    const bt = getCashTotals(b.id, selectedDate);
+    const branchTotal = bt.dailyTodayBalance + bt.monthlyBalance;
+    return `
+      <div class="cash-branch-card">
+        <div class="cash-branch-head">
+          <span>${escape(getBranchName(b.id))}</span>
+          ${getClosureStatusBadge(b.id, selectedDate)}
+        </div>
+        <div class="cash-branch-total mono">${formatCurrency(branchTotal)}</div>
+        <div class="cash-branch-split">
+          <div>
+            <span>Diaria</span>
+            <strong class="mono">${formatCurrency(bt.dailyTodayBalance)}</strong>
+          </div>
+          <div>
+            <span>Mensual</span>
+            <strong class="mono">${formatCurrency(bt.monthlyBalance)}</strong>
+          </div>
+        </div>
+      </div>`;
+  }).join("");
+
   const movements = cashMovements.filter(m => {
     const haystack = [m.category, m.description, m.source, getBranchName(m.branch_id)].join(" ").toLowerCase();
-    return haystack.includes(search) && filterByBranch(m) && (filters.cashType === "all" || m.type === filters.cashType);
+    const branchOk = branchId === "all" || m.branch_id === branchId;
+    const typeOk = filters.cashType === "all" || m.type === filters.cashType;
+    const cashKindOk = !filters.cashKind || filters.cashKind === "all" ||
+      (filters.cashKind === "daily" && isDailyCashMovement(m)) ||
+      (filters.cashKind === "monthly" && isMonthlyCashMovement(m));
+    return haystack.includes(search) && branchOk && typeOk && cashKindOk;
   });
 
   content.innerHTML = `
     <div class="grid">
-      <div class="card kpi"><div class="kpi-label">Saldo total</div><div class="kpi-value mono">${formatCurrency(boxes.reduce((a,c) => a + Number(c.current_balance || 0), 0))}</div><div class="kpi-help">Caja</div></div>
-      <div class="card kpi"><div class="kpi-label">Ingresos</div><div class="kpi-value mono">${formatCurrency(movements.filter(m => m.type === "ingreso").reduce((a,m) => a + Number(m.amount || 0), 0))}</div><div class="kpi-help">Movimientos</div></div>
-      <div class="card kpi"><div class="kpi-label">Egresos</div><div class="kpi-value mono">${formatCurrency(movements.filter(m => m.type === "egreso").reduce((a,m) => a + Number(m.amount || 0), 0))}</div><div class="kpi-help">Gastos/vueltos</div></div>
-      <div class="card kpi"><div class="kpi-label">Movimientos</div><div class="kpi-value">${movements.length}</div><div class="kpi-help">Historial</div></div>
-
-      <div class="card span-12">
-        <div class="cash-summary">
-          ${boxes.map(b => `<div class="cash-box-card"><div class="cash-box-branch">${escape(getBranchName(b.branch_id))}</div><div class="cash-box-balance">${formatCurrency(b.current_balance)}</div></div>`).join("")}
+      <div class="card span-12 cash-summary-panel">
+        <div class="cash-summary-top">
+          <div>
+            <div class="section-title">Resumen de caja</div>
+            <div class="section-subtitle">Vista compacta por caja y sede · ${formatDate(selectedDate)}</div>
+          </div>
+          <div class="cash-grand-total">
+            <span>Total general</span>
+            <strong class="mono">${formatCurrency(globalTotals.dailyTodayBalance + globalTotals.monthlyBalance)}</strong>
+          </div>
         </div>
 
+        <div class="cash-main-grid">
+          <div class="cash-main-card primary">
+            <span>Total caja</span>
+            <strong class="mono">${formatCurrency(globalTotals.dailyTodayBalance + globalTotals.monthlyBalance)}</strong>
+            <small>Diaria + mensual de ambas sedes</small>
+          </div>
+          <div class="cash-main-card">
+            <span>Caja diaria total</span>
+            <strong class="mono">${formatCurrency(globalTotals.dailyTodayBalance)}</strong>
+            <small>Solo movimientos del ${formatDate(selectedDate)}</small>
+          </div>
+          <div class="cash-main-card">
+            <span>Caja mensual total</span>
+            <strong class="mono">${formatCurrency(globalTotals.monthlyBalance)}</strong>
+            <small>Fondo mensual acumulado de ambas sedes</small>
+          </div>
+        </div>
+
+        <div class="cash-branch-title">Detalle por sede</div>
+        <div class="cash-branch-grid">
+          ${branchCashCards}
+        </div>
+      </div>
+
+      <div class="card span-12">
         <div class="filters-bar">
           ${branchFilterHtml()}
+          <input class="filter-select" type="date" value="${selectedDate}" onchange="setFilter('cashDate', this.value)">
+          <select class="filter-select" onchange="setFilter('cashKind', this.value)">
+            <option value="all" ${(!filters.cashKind || filters.cashKind === "all") ? "selected" : ""}>Todas las cajas</option>
+            <option value="daily" ${filters.cashKind === "daily" ? "selected" : ""}>Caja diaria</option>
+            <option value="monthly" ${filters.cashKind === "monthly" ? "selected" : ""}>Caja mensual</option>
+          </select>
           <select class="filter-select" onchange="setFilter('cashType', this.value)">
             <option value="all">Todos</option>
             <option value="ingreso" ${filters.cashType === "ingreso" ? "selected" : ""}>Ingresos</option>
             <option value="egreso" ${filters.cashType === "egreso" ? "selected" : ""}>Egresos</option>
           </select>
+          <button class="btn btn-secondary" onclick="openCashReopenModal()">Abrir caja</button>
+          <button class="btn btn-primary" onclick="openDailyCloseModal()">Cerrar caja diaria</button>
         </div>
 
-        <div class="table-wrapper">
+        <div class="table-wrapper scroll-table tall-scroll">
           <table>
-            <thead><tr><th>Fecha</th><th>Sede</th><th>Tipo</th><th>Categoría</th><th>Fuente</th><th>Descripción</th><th>Monto</th></tr></thead>
+            <thead><tr><th>Fecha</th><th>Sede</th><th>Caja</th><th>Tipo</th><th>Categoría</th><th>Fuente</th><th>Descripción</th><th>Monto</th></tr></thead>
             <tbody>
-              ${movements.map(m => `
+              ${movements.length ? movements.map(m => `
                 <tr>
                   <td>${formatDateTime(m.date)}</td>
                   <td>${escape(getBranchName(m.branch_id))}</td>
+                  <td><span class="badge neutral">${isDailyCashMovement(m) ? "Diaria" : "Mensual"}</span></td>
                   <td><span class="badge ${m.type === "ingreso" ? "ok" : "warning"}">${escape(m.type)}</span></td>
                   <td>${escape(m.category)}</td>
                   <td>${escape(m.source)}</td>
                   <td>${escape(m.description || "—")}</td>
                   <td class="mono">${formatCurrency(m.amount)}</td>
-                </tr>`).join("")}
+                </tr>`).join("") : `<tr><td colspan="8"><div class="empty-state"><p>No hay movimientos para estos filtros.</p></div></td></tr>`}
             </tbody>
           </table>
         </div>
@@ -2574,21 +2760,19 @@ function openCashMovementModal() {
   document.getElementById("modalTitle").textContent = "Movimiento de caja";
 
   document.getElementById("modalForm").innerHTML = `
-    <div class="form-group"><label>Sede</label><select id="cBranch">${branchOptions(branches[0]?.id)}</select></div>
-    <div class="form-group"><label>Tipo</label><select id="cType"><option value="ingreso">Ingreso</option><option value="egreso">Egreso</option></select></div>
-    <div class="form-group"><label>Categoría</label>
-      <select id="cCategory">
-        <option>Apertura semanal</option>
-        <option>Ajuste manual</option>
-        ${EXPENSE_CATEGORIES.map(c => `<option>${c}</option>`).join("")}
-      </select>
-    </div>
+    <div class="form-group"><label>Sede</label><select id="cBranch" onchange="updateCashCategoryOptions()">${branchOptions(branches[0]?.id)}</select></div>
+    <div class="form-group"><label>Caja</label><select id="cKind" onchange="updateCashCategoryOptions()"><option value="monthly">Caja mensual</option><option value="daily">Caja diaria</option></select></div>
+    <div class="form-group"><label>Tipo</label><select id="cType" onchange="updateCashCategoryOptions()"><option value="ingreso">Ingreso</option><option value="egreso">Egreso</option></select></div>
+    <div class="form-group"><label>Categoría</label><select id="cCategory"></select></div>
     <div class="form-group"><label>Monto</label><input type="number" id="cAmount" min="0.01" step="0.01" required></div>
-    <div class="form-group full"><label>Descripción</label><textarea id="cDesc"></textarea></div>
+    <div class="form-group full"><label>Descripción</label><textarea id="cDesc" placeholder="Detalle del movimiento"></textarea></div>
+    <div class="form-group full"><div class="form-hint" id="cashLockHint">Usa caja diaria para ventas/recaudación del día. Usa caja mensual para gastos operativos y fondo mensual.</div></div>
     <div class="form-actions">
       <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
       <button class="btn btn-primary" type="submit">Guardar</button>
     </div>`;
+
+  updateCashCategoryOptions();
 
   document.getElementById("modalForm").onsubmit = async e => {
     e.preventDefault();
@@ -2596,20 +2780,29 @@ function openCashMovementModal() {
     const branchId = document.getElementById("cBranch").value;
     const box = cashBoxes.find(c => c.branch_id === branchId);
     const type = document.getElementById("cType").value;
+    const kind = document.getElementById("cKind").value;
     const amount = Number(document.getElementById("cAmount").value);
 
-    if (!box) {
-      showToast("No existe caja para esta sede.", "error");
+    if (!box) { showToast("No existe caja para esta sede.", "error"); return; }
+    if (amount <= 0) { showToast("Monto inválido.", "error"); return; }
+
+    const movementDate = getTodayIso();
+    if (kind === "daily" && isDailyCashClosed(branchId, movementDate)) {
+      showToast("La caja diaria está cerrada. Abre la caja con código administrador para hacer movimientos manuales.", "error");
       return;
     }
 
-    if (amount <= 0) {
-      showToast("Monto inválido.", "error");
-      return;
+    if (type === "egreso" && kind === "daily") {
+      const available = await getFreshDailyCashBalanceForBranch(branchId);
+      if (amount > available) {
+        showToast(`La caja diaria no tiene suficiente saldo. Disponible: ${formatCurrency(available)}.`, "error");
+        return;
+      }
     }
 
     await safeAction(async () => {
       const category = document.getElementById("cCategory").value;
+      const source = kind === "daily" ? "ajuste caja diaria" : "ajuste caja mensual";
       const { error } = await db.from("cash_movements").insert({
         cash_box_id: box.id,
         branch_id: branchId,
@@ -2617,8 +2810,9 @@ function openCashMovementModal() {
         category,
         amount,
         description: document.getElementById("cDesc").value.trim() || null,
-        source: category === "Apertura semanal" ? "apertura semanal" : "ajuste manual",
-        payment_method: "Efectivo"
+        source,
+        payment_method: "Efectivo",
+        cash_kind: kind
       });
       if (error) throw error;
     }, "Movimiento de caja registrado.");
@@ -2627,12 +2821,196 @@ function openCashMovementModal() {
   openModal();
 }
 
+function updateCashCategoryOptions() {
+  const kind = document.getElementById("cKind")?.value || "monthly";
+  const type = document.getElementById("cType")?.value || "ingreso";
+  const select = document.getElementById("cCategory");
+  if (!select) return;
+  let options = [];
+  if (kind === "daily") {
+    options = type === "ingreso" ? ["Ingreso diario", "Venta en efectivo", "Pago de alumno", "Ajuste caja diaria"] : ["Cierre de caja diaria", "Vuelto", "Ajuste caja diaria"];
+  } else {
+    options = type === "ingreso" ? ["Apertura mensual", "Aporte a caja mensual", "Ajuste caja mensual"] : EXPENSE_CATEGORIES;
+  }
+  select.innerHTML = options.map(o => `<option>${escape(o)}</option>`).join("");
+  const hint = document.getElementById("cashLockHint");
+  const branchId = document.getElementById("cBranch")?.value;
+  if (hint && branchId && kind === "daily" && isDailyCashClosed(branchId, getTodayIso())) {
+    hint.innerHTML = "⚠️ La caja diaria de hoy está cerrada. No se permiten movimientos manuales hasta reabrirla con código administrador.";
+  } else if (hint) {
+    hint.textContent = "Usa caja diaria para ventas/recaudación del día. Usa caja mensual para gastos operativos y fondo mensual.";
+  }
+}
+
+function openDailyCloseModal() {
+  const defaultBranch = filters.branchId !== "all" ? filters.branchId : branches[0]?.id;
+  const date = filters.cashDate || getTodayIso();
+  document.getElementById("modalTitle").textContent = "Cierre de caja diaria";
+  document.getElementById("modalForm").innerHTML = `
+    <div class="form-group"><label>Sede</label><select id="closeBranch" onchange="updateDailyClosePreview()">${branchOptions(defaultBranch)}</select></div>
+    <div class="form-group"><label>Fecha</label><input type="date" id="closeDate" value="${date}" onchange="updateDailyClosePreview()"></div>
+    <div class="form-group full"><label>Efectivo contado (S/)</label><input type="number" id="closeCounted" min="0" step="0.01" value="0" oninput="updateDailyClosePreview()"></div>
+    <div class="form-group full">
+      <div class="daily-close-preview" id="dailyClosePreview"></div>
+    </div>
+    <div class="form-group full"><label>Responsable / observación</label><textarea id="closeNote" placeholder="Ej: Cierre entregado a administración"></textarea></div>
+    <div class="form-actions">
+      <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" type="submit">Cerrar caja diaria</button>
+    </div>`;
+
+  updateDailyClosePreview();
+
+  document.getElementById("modalForm").onsubmit = async e => {
+    e.preventDefault();
+    const branchId = document.getElementById("closeBranch").value;
+    const closeDate = document.getElementById("closeDate").value;
+    const counted = Number(document.getElementById("closeCounted").value || 0);
+    const amount = await getFreshDailyCashBalanceForBranch(branchId, closeDate);
+    const box = cashBoxes.find(c => c.branch_id === branchId);
+
+    if (!box) { showToast("No existe caja para esta sede.", "error"); return; }
+    if (isDailyCashClosed(branchId, closeDate)) { showToast("La caja diaria ya está cerrada para esa sede y fecha.", "error"); return; }
+    if (amount <= 0) { showToast("No hay saldo diario para cerrar en esa fecha.", "error"); return; }
+
+    const diff = counted - amount;
+    const note = document.getElementById("closeNote").value.trim();
+
+    await safeAction(async () => {
+      const { data: closure, error: closureError } = await db.from("daily_cash_closures").insert({
+        branch_id: branchId,
+        date: closeDate,
+        expected_amount: amount,
+        counted_amount: counted,
+        difference_amount: diff,
+        note: note || null,
+        admin_code_used: null
+      }).select().single();
+      if (closureError) throw closureError;
+
+      const { error } = await db.from("cash_movements").insert({
+        cash_box_id: box.id,
+        branch_id: branchId,
+        type: "egreso",
+        category: "Cierre de caja diaria",
+        amount,
+        description: `Cierre de caja diaria ${closeDate}. Esperado: ${formatCurrency(amount)} · Contado: ${formatCurrency(counted)} · Diferencia: ${formatCurrency(diff)}. ${note || "Retiro al finalizar el día."}`,
+        source: "cierre diario",
+        payment_method: "Efectivo",
+        cash_kind: "daily",
+        closure_id: closure?.id || null
+      });
+      if (error) throw error;
+    }, "Caja diaria cerrada y reporte guardado.");
+  };
+
+  openModal();
+}
+
+async function updateDailyClosePreview() {
+  const el = document.getElementById("dailyClosePreview");
+  if (!el) return;
+  const branchId = document.getElementById("closeBranch")?.value;
+  const date = document.getElementById("closeDate")?.value || getTodayIso();
+  const counted = Number(document.getElementById("closeCounted")?.value || 0);
+  const t = getCashTotals(branchId, date);
+  const diff = counted - t.dailyTodayBalance;
+  const closed = isDailyCashClosed(branchId, date);
+  el.innerHTML = `
+    <div class="close-summary-grid">
+      <div><span>Ingresos diarios</span><strong>${formatCurrency(t.dailyTodayIn)}</strong></div>
+      <div><span>Egresos diarios</span><strong>${formatCurrency(t.dailyTodayOut)}</strong></div>
+      <div><span>Esperado a retirar</span><strong>${formatCurrency(t.dailyTodayBalance)}</strong></div>
+      <div><span>Efectivo contado</span><strong>${formatCurrency(counted)}</strong></div>
+      <div><span>Diferencia</span><strong class="${diff === 0 ? "" : diff < 0 ? "danger-text" : "ok-text"}">${formatCurrency(diff)}</strong></div>
+      <div><span>Estado</span><strong>${closed ? "Cerrada" : "Abierta"}</strong></div>
+    </div>
+    <p class="form-hint">Al cerrar, se guarda un historial imprimible y se bloquean movimientos manuales de esa caja hasta reabrirla.</p>`;
+}
+
+async function getFreshDailyCashBalanceForBranch(branchId, dateIso = getTodayIso()) {
+  await refreshData();
+  return getDailyCashBalanceForBranch(branchId, dateIso);
+}
+
+function getDailyClosure(branchId, dateIso = getTodayIso()) {
+  return dailyCashClosures.find(c =>
+    c.branch_id === branchId &&
+    String(c.date).slice(0, 10) === dateIso &&
+    !c.reopened_at
+  );
+}
+
+function isDailyCashClosed(branchId, dateIso = getTodayIso()) {
+  return Boolean(getDailyClosure(branchId, dateIso));
+}
+
+function getClosureStatusBadge(branchId, dateIso = getTodayIso()) {
+  const closed = isDailyCashClosed(branchId, dateIso);
+  return `<span class="badge ${closed ? "warning" : "ok"}">${closed ? "Caja cerrada" : "Caja abierta"}</span>`;
+}
+
+function getCashRows(branchId = "all", dateIso = null, kind = "all") {
+  return cashMovements.filter(m => {
+    const branchOk = branchId === "all" || m.branch_id === branchId;
+    const dateOk = !dateIso || isSameDay(m.date, dateIso);
+    const kindOk = kind === "all" || (kind === "daily" && isDailyCashMovement(m)) || (kind === "monthly" && isMonthlyCashMovement(m));
+    return branchOk && dateOk && kindOk;
+  });
+}
+
+function sumMovements(rows, type = null) {
+  return rows.filter(m => !type || m.type === type).reduce((a, m) => a + Number(m.amount || 0), 0);
+}
+
+function getMonthlyRows(monthCycle = getCurrentCycle(new Date()), branchId = "all") {
+  return cashMovements.filter(m => String(m.date || "").startsWith(monthCycle) && (branchId === "all" || m.branch_id === branchId));
+}
+
+function openCashReopenModal() {
+  const defaultBranch = filters.branchId !== "all" ? filters.branchId : branches[0]?.id;
+  const date = filters.cashDate || getTodayIso();
+  document.getElementById("modalTitle").textContent = "Abrir caja diaria";
+  document.getElementById("modalForm").innerHTML = `
+    <div class="form-group"><label>Sede</label><select id="openBranch">${branchOptions(defaultBranch)}</select></div>
+    <div class="form-group"><label>Fecha</label><input type="date" id="openDate" value="${date}"></div>
+    <div class="form-group full"><label>Código administrador</label><input type="password" id="openCode" placeholder="Código único" autocomplete="off"></div>
+    <div class="form-group full"><label>Motivo</label><textarea id="openReason" placeholder="Ej: Corrección autorizada después del cierre"></textarea></div>
+    <div class="form-actions">
+      <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" type="submit">Abrir caja</button>
+    </div>`;
+
+  document.getElementById("modalForm").onsubmit = async e => {
+    e.preventDefault();
+    const branchId = document.getElementById("openBranch").value;
+    const dateIso = document.getElementById("openDate").value;
+    const code = document.getElementById("openCode").value.trim();
+    const reason = document.getElementById("openReason").value.trim();
+    const closure = getDailyClosure(branchId, dateIso);
+
+    if (code !== ADMIN_CASH_CODE) { showToast("Código de administrador incorrecto.", "error"); return; }
+    if (!closure) { showToast("No hay una caja cerrada para esa sede y fecha.", "error"); return; }
+    if (!reason) { showToast("Indica el motivo para abrir la caja.", "error"); return; }
+
+    await safeAction(async () => {
+      const { error } = await db.from("daily_cash_closures").update({
+        reopened_at: new Date().toISOString(),
+        reopen_reason: reason,
+        reopened_by_code: code
+      }).eq("id", closure.id);
+      if (error) throw error;
+    }, "Caja diaria abierta nuevamente.");
+  };
+  openModal();
+}
+
 /* ============================================================
    INVENTORY
    ============================================================ */
 function renderInventory(content, search) {
   const list = inventory.filter(p => {
-    const haystack = [p.name, p.category].join(" ").toLowerCase();
+    const haystack = [p.name].join(" ").toLowerCase();
     return haystack.includes(search) && (filters.stock === "all" || (filters.stock === "low" && isLowStock(p)));
   });
 
@@ -2651,14 +3029,13 @@ function renderInventory(content, search) {
           </select>
         </div>
 
-        <div class="table-wrapper">
+        <div class="table-wrapper scroll-table">
           <table>
-            <thead><tr><th>Producto</th><th>Categoría</th><th>Precio</th><th>Stock</th><th>Mínimo</th><th>Valor</th><th>Estado</th><th></th></tr></thead>
+            <thead><tr><th>Producto</th><th>Precio</th><th>Stock</th><th>Mínimo</th><th>Valor</th><th>Estado</th><th></th></tr></thead>
             <tbody>
               ${list.length ? list.map(p => `
                 <tr>
                   <td>${escape(p.name)}</td>
-                  <td>${escape(p.category)}</td>
                   <td class="mono">${formatCurrency(p.price)}</td>
                   <td><strong>${p.stock}</strong></td>
                   <td>${p.min_stock}</td>
@@ -2668,7 +3045,7 @@ function renderInventory(content, search) {
                     <button class="btn btn-ghost btn-sm btn-icon" onclick="openProductModal('${p.id}')">✎</button>
                     <button class="btn btn-danger btn-sm btn-icon" onclick="confirmDeleteProduct('${p.id}')">✕</button>
                   </td>
-                </tr>`).join("") : `<tr><td colspan="8"><div class="empty-state"><p>No se encontraron productos.</p></div></td></tr>`}
+                </tr>`).join("") : `<tr><td colspan="7"><div class="empty-state"><p>No se encontraron productos.</p></div></td></tr>`}
             </tbody>
           </table>
         </div>
@@ -2683,8 +3060,7 @@ function openProductModal(id = null) {
   document.getElementById("modalTitle").textContent = id ? "Editar producto" : "Agregar producto";
 
   document.getElementById("modalForm").innerHTML = `
-    <div class="form-group"><label>Producto</label><input type="text" id="prdName" required value="${escape(p?.name || "")}"></div>
-    <div class="form-group"><label>Categoría</label><input type="text" id="prdCat" required value="${escape(p?.category || "")}"></div>
+    <div class="form-group full"><label>Producto</label><input type="text" id="prdName" required value="${escape(p?.name || "")}" placeholder="Ej: Cinturón, guantes, uniforme"></div>
     <div class="form-group"><label>Precio (S/)</label><input type="number" id="prdPrice" required min="0.01" step="0.01" value="${p?.price || ""}"></div>
     <div class="form-group"><label>Stock</label><input type="number" id="prdStock" required min="0" value="${p?.stock ?? ""}"></div>
     <div class="form-group full"><label>Stock mínimo</label><input type="number" id="prdMin" required min="0" value="${p?.min_stock ?? ""}"></div>
@@ -2698,15 +3074,15 @@ function openProductModal(id = null) {
 
     const payload = {
       name: document.getElementById("prdName").value.trim(),
-      category: document.getElementById("prdCat").value.trim(),
+      category: "General",
       price: Number(document.getElementById("prdPrice").value),
       stock: Number(document.getElementById("prdStock").value),
       min_stock: Number(document.getElementById("prdMin").value),
       active: true
     };
 
-    if (!payload.name || !payload.category || payload.price < 0 || payload.stock < 0) {
-      showToast("Completa producto, categoría, precio y stock válidos.", "error");
+    if (!payload.name || payload.price <= 0 || payload.stock < 0 || payload.min_stock < 0) {
+      showToast("Completa producto, precio y stock válidos.", "error");
       return;
     }
 
@@ -2790,7 +3166,7 @@ function renderSales(content, search) {
           </select>
         </div>
 
-        <div class="table-wrapper">
+        <div class="table-wrapper scroll-table tall-scroll">
           <table>
             <thead><tr><th>Boleta</th><th>Fecha</th><th>Cliente</th><th>Sede</th><th>Productos</th><th>Método</th><th>Total</th><th></th></tr></thead>
             <tbody>
@@ -3042,19 +3418,11 @@ function getNextReceiptNumber() {
 }
 
 function getCashBalanceForBranch(branchId) {
-  const box = cashBoxes.find(c => c.branch_id === branchId);
-  return Number(box?.current_balance || 0);
+  return getDailyCashBalanceForBranch(branchId);
 }
 
 async function getFreshCashBalanceForBranch(branchId) {
-  const { data, error } = await db
-    .from("cash_boxes")
-    .select("current_balance")
-    .eq("branch_id", branchId)
-    .maybeSingle();
-
-  if (error) throw error;
-  return Number(data?.current_balance || 0);
+  return getFreshDailyCashBalanceForBranch(branchId);
 }
 
 async function saveSale(e) {
@@ -3174,51 +3542,175 @@ function printReceipt(id) {
    REPORTS
    ============================================================ */
 function renderReports(content, search) {
-  const totalPayments = payments.reduce((a,p) => a + Number(p.amount || 0), 0);
-  const totalSales = sales.reduce((a,s) => a + Number(s.total || 0), 0);
-  const cashIn = cashMovements.filter(m => m.type === "ingreso").reduce((a,m) => a + Number(m.amount || 0), 0);
-  const cashOut = cashMovements.filter(m => m.type === "egreso").reduce((a,m) => a + Number(m.amount || 0), 0);
+  const selectedDate = filters.reportDate || getTodayIso();
+  const selectedMonth = filters.reportMonth || getCurrentCycle(new Date());
+  const dayPayments = payments.filter(p => isSameDay(p.date, selectedDate));
+  const daySales = sales.filter(s => isSameDay(s.date, selectedDate));
+  const dayCash = getCashRows("all", selectedDate, "all");
+  const monthPayments = payments.filter(p => String(p.date || "").startsWith(selectedMonth));
+  const monthSales = sales.filter(s => String(s.date || "").startsWith(selectedMonth));
+  const monthCash = getMonthlyRows(selectedMonth, "all");
+  const dayClosures = dailyCashClosures.filter(c => String(c.date).slice(0,10) === selectedDate);
+
+  const totalDayPayments = dayPayments.reduce((a,p) => a + Number(p.amount || 0), 0);
+  const totalDaySales = daySales.reduce((a,s) => a + Number(s.total || 0), 0);
+  const totalMonthPayments = monthPayments.reduce((a,p) => a + Number(p.amount || 0), 0);
+  const totalMonthSales = monthSales.reduce((a,s) => a + Number(s.total || 0), 0);
+  const dayIn = sumMovements(dayCash, "ingreso");
+  const dayOut = sumMovements(dayCash, "egreso");
+  const monthIn = sumMovements(monthCash, "ingreso");
+  const monthOut = sumMovements(monthCash, "egreso");
+
+  const filteredDayCash = dayCash.filter(m => {
+    const haystack = [m.category, m.description, m.source, getBranchName(m.branch_id)].join(" ").toLowerCase();
+    return haystack.includes(search);
+  });
+
+  const dayExpenses = dayCash.filter(m => m.type === "egreso" && !String(m.category || "").toLowerCase().includes("cierre de caja diaria"));
+  const monthExpenses = monthCash.filter(m => m.type === "egreso" && !String(m.category || "").toLowerCase().includes("cierre de caja diaria"));
+  const filteredExpenses = monthExpenses.filter(m => {
+    const haystack = [m.category, m.description, m.source, getBranchName(m.branch_id), isDailyCashMovement(m) ? "caja diaria" : "caja mensual"].join(" ").toLowerCase();
+    return haystack.includes(search);
+  });
 
   content.innerHTML = `
     <div class="grid">
-      <div class="card kpi"><div class="kpi-label">Pagos</div><div class="kpi-value mono">${formatCurrency(totalPayments)}</div><div class="kpi-help">Finanzas</div></div>
-      <div class="card kpi"><div class="kpi-label">Ventas</div><div class="kpi-value mono">${formatCurrency(totalSales)}</div><div class="kpi-help">Tienda</div></div>
-      <div class="card kpi"><div class="kpi-label">Ingresos caja</div><div class="kpi-value mono">${formatCurrency(cashIn)}</div><div class="kpi-help">Caja</div></div>
-      <div class="card kpi"><div class="kpi-label">Egresos caja</div><div class="kpi-value mono">${formatCurrency(cashOut)}</div><div class="kpi-help">Gastos/vueltos</div></div>
-
-      <div class="card span-4">
-        <div class="section-title">Alumnos por sede</div>
-        <div class="info-list">${branches.map(b => `<div class="info-row"><span>${escape(getBranchName(b.id))}</span><strong>${students.filter(s => s.branch_id === b.id).length}</strong></div>`).join("")}</div>
+      <div class="card span-12 report-filter-card">
+        <div class="filters-bar">
+          <div class="form-group compact"><label>Reporte diario</label><input class="filter-select" type="date" value="${selectedDate}" onchange="setFilter('reportDate', this.value)"></div>
+          <div class="form-group compact"><label>Reporte mensual</label><input class="filter-select" type="month" value="${selectedMonth}" onchange="setFilter('reportMonth', this.value)"></div>
+          <button class="btn btn-secondary" onclick="printDailyReport('${selectedDate}')">Imprimir reporte diario</button>
+        </div>
       </div>
 
-      <div class="card span-4">
-        <div class="section-title">Alumnos por disciplina</div>
-        <div class="info-list">${DISCIPLINES.map(d => `<div class="info-row"><span>${escape(d)}</span><strong>${students.filter(s => s.discipline === d).length}</strong></div>`).join("")}</div>
-      </div>
+      <div class="card kpi"><div class="kpi-label">Día · Pagos</div><div class="kpi-value mono">${formatCurrency(totalDayPayments)}</div><div class="kpi-help">${formatDate(selectedDate)}</div></div>
+      <div class="card kpi"><div class="kpi-label">Día · Ventas</div><div class="kpi-value mono">${formatCurrency(totalDaySales)}</div><div class="kpi-help">${daySales.length} ventas</div></div>
+      <div class="card kpi"><div class="kpi-label">Día · Caja neta</div><div class="kpi-value mono">${formatCurrency(dayIn - dayOut)}</div><div class="kpi-help">Ingresos - egresos</div></div>
+      <div class="card kpi"><div class="kpi-label">Día · Gastos caja</div><div class="kpi-value mono">${formatCurrency(dayExpenses.reduce((a,m)=>a+Number(m.amount||0),0))}</div><div class="kpi-help">Egresos manuales</div></div>
 
-      <div class="card span-4">
-        <div class="section-title">Inventario</div>
+      <div class="card kpi"><div class="kpi-label">Mes · Pagos</div><div class="kpi-value mono">${formatCurrency(totalMonthPayments)}</div><div class="kpi-help">${escape(selectedMonth)}</div></div>
+      <div class="card kpi"><div class="kpi-label">Mes · Ventas</div><div class="kpi-value mono">${formatCurrency(totalMonthSales)}</div><div class="kpi-help">${monthSales.length} ventas</div></div>
+      <div class="card kpi"><div class="kpi-label">Mes · Ingresos caja</div><div class="kpi-value mono">${formatCurrency(monthIn)}</div><div class="kpi-help">Movimientos</div></div>
+      <div class="card kpi"><div class="kpi-label">Mes · Egresos caja</div><div class="kpi-value mono">${formatCurrency(monthOut)}</div><div class="kpi-help">Gastos / cierres</div></div>
+
+      <div class="card span-6">
+        <div class="section-title">Resumen diario por sede</div>
         <div class="info-list">
-          <div class="info-row"><span>Productos</span><strong>${inventory.length}</strong></div>
-          <div class="info-row"><span>Stock crítico</span><strong>${inventory.filter(isLowStock).length}</strong></div>
-          <div class="info-row"><span>Valor inventario</span><strong>${formatCurrency(inventory.reduce((a,p) => a + Number(p.price || 0) * Number(p.stock || 0), 0))}</strong></div>
+          ${branches.map(b => {
+            const rows = getCashRows(b.id, selectedDate, "all");
+            return `<div class="info-row"><span>${escape(getBranchName(b.id))}</span><strong>${formatCurrency(sumMovements(rows,"ingreso") - sumMovements(rows,"egreso"))}</strong></div>`;
+          }).join("")}
+        </div>
+      </div>
+
+      <div class="card span-6">
+        <div class="section-title">Resumen mensual por sede</div>
+        <div class="info-list">
+          ${branches.map(b => {
+            const rows = getMonthlyRows(selectedMonth, b.id);
+            return `<div class="info-row"><span>${escape(getBranchName(b.id))}</span><strong>${formatCurrency(sumMovements(rows,"ingreso") - sumMovements(rows,"egreso"))}</strong></div>`;
+          }).join("")}
         </div>
       </div>
 
       <div class="card span-12">
-        <div class="section-title">Últimos movimientos de caja</div>
-        <div class="history-list">
-          ${cashMovements.slice(0, 12).map(m => `
+        <div class="section-title">Historial de cierres del día</div>
+        <div class="history-list scroll-list">
+          ${dayClosures.length ? dayClosures.map(c => `
             <article class="history-item" data-type="cash">
+              <div class="history-head">
+                <div class="history-title">${escape(getBranchName(c.branch_id))} · Esperado ${formatCurrency(c.expected_amount)} · Contado ${formatCurrency(c.counted_amount)}</div>
+                <div class="history-time">${formatDateTime(c.closed_at)}</div>
+              </div>
+              <div class="history-meta">Diferencia: ${formatCurrency(c.difference_amount)} · ${escape(c.note || "Sin observación")}${c.reopened_at ? ` · Reabierta: ${formatDateTime(c.reopened_at)}` : ""}</div>
+              <div style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="printClosureReport('${c.id}')">Imprimir cierre</button></div>
+            </article>`).join("") : `<div class="empty-state"><p>No hay cierres registrados para este día.</p></div>`}
+        </div>
+      </div>
+
+      <div class="card span-12">
+        <div class="section-title">Historial de gastos de caja</div>
+        <div class="section-subtitle" style="margin-bottom:12px">Egresos del mes seleccionado, sin contar cierres diarios. Sirve para revisar todo gasto hecho desde Caja.</div>
+        <div class="history-list scroll-list">
+          ${filteredExpenses.length ? filteredExpenses.map(m => `
+            <article class="history-item" data-type="egreso">
+              <div class="history-head">
+                <div class="history-title">${escape(m.category || "Gasto")} · ${formatCurrency(m.amount)}</div>
+                <div class="history-time">${formatDateTime(m.date)}</div>
+              </div>
+              <div class="history-meta">${escape(getBranchName(m.branch_id))} · ${isDailyCashMovement(m) ? "Caja diaria" : "Caja mensual"} · ${escape(m.description || m.source || "Sin descripción")}</div>
+            </article>`).join("") : `<div class="empty-state"><p>No hay gastos de caja en el mes seleccionado.</p></div>`}
+        </div>
+      </div>
+
+      <div class="card span-12">
+        <div class="section-title">Movimientos del día seleccionado</div>
+        <div class="history-list scroll-list">
+          ${filteredDayCash.length ? filteredDayCash.map(m => `
+            <article class="history-item" data-type="${escape(m.type)}">
               <div class="history-head">
                 <div class="history-title">${escape(m.category)} · ${formatCurrency(m.amount)}</div>
                 <div class="history-time">${formatDateTime(m.date)}</div>
               </div>
-              <div class="history-meta">${escape(getBranchName(m.branch_id))} · ${escape(m.description || m.source)}</div>
-            </article>`).join("")}
+              <div class="history-meta">${escape(getBranchName(m.branch_id))} · ${isDailyCashMovement(m) ? "Caja diaria" : "Caja mensual"} · ${escape(m.description || m.source)}</div>
+            </article>`).join("") : `<div class="empty-state"><p>No hay movimientos para ese día.</p></div>`}
         </div>
       </div>
     </div>`;
+}
+
+function buildPrintableDailyReport(dateIso) {
+  const rows = getCashRows("all", dateIso, "all");
+  const closures = dailyCashClosures.filter(c => String(c.date).slice(0,10) === dateIso);
+  const dayPayments = payments.filter(p => isSameDay(p.date, dateIso));
+  const daySales = sales.filter(s => isSameDay(s.date, dateIso));
+  const inTotal = sumMovements(rows, "ingreso");
+  const outTotal = sumMovements(rows, "egreso");
+  return `
+    <h1>ESAM-DO 2026</h1>
+    <h2>Reporte diario · ${formatDate(dateIso)}</h2>
+    <div class="summary">
+      <div><span>Pagos</span><strong>${formatCurrency(dayPayments.reduce((a,p)=>a+Number(p.amount||0),0))}</strong></div>
+      <div><span>Ventas</span><strong>${formatCurrency(daySales.reduce((a,s)=>a+Number(s.total||0),0))}</strong></div>
+      <div><span>Ingresos caja</span><strong>${formatCurrency(inTotal)}</strong></div>
+      <div><span>Egresos caja</span><strong>${formatCurrency(outTotal)}</strong></div>
+      <div><span>Neto</span><strong>${formatCurrency(inTotal - outTotal)}</strong></div>
+      <div><span>Cierres</span><strong>${closures.length}</strong></div>
+    </div>
+    <h3>Cierres de caja</h3>
+    <table><thead><tr><th>Sede</th><th>Esperado</th><th>Contado</th><th>Diferencia</th><th>Hora</th><th>Nota</th></tr></thead><tbody>
+      ${closures.map(c => `<tr><td>${escape(getBranchName(c.branch_id))}</td><td>${formatCurrency(c.expected_amount)}</td><td>${formatCurrency(c.counted_amount)}</td><td>${formatCurrency(c.difference_amount)}</td><td>${formatDateTime(c.closed_at)}</td><td>${escape(c.note || "")}</td></tr>`).join("") || `<tr><td colspan="6">Sin cierres.</td></tr>`}
+    </tbody></table>
+    <h3>Movimientos</h3>
+    <table><thead><tr><th>Hora</th><th>Sede</th><th>Caja</th><th>Tipo</th><th>Categoría</th><th>Descripción</th><th>Monto</th></tr></thead><tbody>
+      ${rows.map(m => `<tr><td>${formatDateTime(m.date)}</td><td>${escape(getBranchName(m.branch_id))}</td><td>${isDailyCashMovement(m) ? "Diaria" : "Mensual"}</td><td>${escape(m.type)}</td><td>${escape(m.category || "")}</td><td>${escape(m.description || m.source || "")}</td><td>${formatCurrency(m.amount)}</td></tr>`).join("") || `<tr><td colspan="7">Sin movimientos.</td></tr>`}
+    </tbody></table>`;
+}
+
+function printDailyReport(dateIso = getTodayIso()) {
+  const win = window.open("", "_blank", "width=900,height=760");
+  if (!win) { showToast("Permite ventanas emergentes para imprimir.", "error"); return; }
+  win.document.write(`<!DOCTYPE html><html><head><title>Reporte diario ${dateIso}</title>${printReportStyle()}</head><body>${buildPrintableDailyReport(dateIso)}<script>window.onload=()=>window.print();<\/script></body></html>`);
+  win.document.close();
+}
+
+function printClosureReport(closureId) {
+  const c = dailyCashClosures.find(x => x.id === closureId);
+  if (!c) return;
+  const rows = getCashRows(c.branch_id, String(c.date).slice(0,10), "daily");
+  const win = window.open("", "_blank", "width=900,height=760");
+  if (!win) { showToast("Permite ventanas emergentes para imprimir.", "error"); return; }
+  win.document.write(`<!DOCTYPE html><html><head><title>Cierre de caja</title>${printReportStyle()}</head><body>
+    <h1>ESAM-DO 2026</h1><h2>Cierre de caja diaria</h2>
+    <div class="summary"><div><span>Sede</span><strong>${escape(getBranchName(c.branch_id))}</strong></div><div><span>Fecha</span><strong>${formatDate(c.date)}</strong></div><div><span>Esperado</span><strong>${formatCurrency(c.expected_amount)}</strong></div><div><span>Contado</span><strong>${formatCurrency(c.counted_amount)}</strong></div><div><span>Diferencia</span><strong>${formatCurrency(c.difference_amount)}</strong></div><div><span>Estado</span><strong>${c.reopened_at ? "Reabierta" : "Cerrada"}</strong></div></div>
+    <p><strong>Observación:</strong> ${escape(c.note || "Sin observación")}</p>
+    <h3>Movimientos de caja diaria</h3><table><thead><tr><th>Hora</th><th>Tipo</th><th>Categoría</th><th>Descripción</th><th>Monto</th></tr></thead><tbody>${rows.map(m => `<tr><td>${formatDateTime(m.date)}</td><td>${escape(m.type)}</td><td>${escape(m.category || "")}</td><td>${escape(m.description || m.source || "")}</td><td>${formatCurrency(m.amount)}</td></tr>`).join("")}</tbody></table>
+    <script>window.onload=()=>window.print();<\/script></body></html>`);
+  win.document.close();
+}
+
+function printReportStyle() {
+  return `<style>body{font-family:Arial,sans-serif;padding:32px;color:#111}h1{margin:0;font-size:22px}h2{margin:4px 0 20px;font-size:18px}h3{margin-top:24px}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0}.summary div{border:1px solid #ddd;border-radius:8px;padding:10px}.summary span{display:block;color:#666;font-size:11px;text-transform:uppercase}.summary strong{font-size:16px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border-bottom:1px solid #ddd;text-align:left;padding:8px;font-size:12px}th{background:#f5f5f5;text-transform:uppercase;font-size:10px}</style>`;
 }
 
 /* ============================================================
@@ -3262,8 +3754,8 @@ function exportAttendance() {
 
 function exportCash() {
   exportCSV([
-    ["Fecha","Sede","Tipo","Categoría","Fuente","Descripción","Monto"],
-    ...cashMovements.map(m => [m.date, getBranchName(m.branch_id), m.type, m.category, m.source, m.description, m.amount])
+    ["Fecha","Sede","Caja","Tipo","Categoría","Fuente","Descripción","Monto"],
+    ...cashMovements.map(m => [m.date, getBranchName(m.branch_id), isDailyCashMovement(m) ? "Caja diaria" : "Caja mensual", m.type, m.category, m.source, m.description, m.amount])
   ], "caja_esamdo.csv");
 }
 
