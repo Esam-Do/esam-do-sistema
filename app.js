@@ -1,19 +1,13 @@
-/* ============================================================
-   ESAM-DO 2026 — Sistema Administrativo conectado a Supabase
-   ============================================================ */
+
 
 "use strict";
 
-/* ============================================================
-   SUPABASE CONFIG
-   ============================================================ */
+
 const SUPABASE_URL = "https://nfimyyufuiyyyiigsgkz.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5maW15eXVmdWl5eXlpaWdzZ2t6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcyMzE2ODUsImV4cCI6MjA5MjgwNzY4NX0.Jdp9tV2C0YzromLFGMeL-5279BtotRRQTzHne3Kada8";
 const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-/* ============================================================
-   ESTADO GLOBAL
-   ============================================================ */
+
 let activeTab = "dashboard";
 let editingId = null;
 let chartInstances = {};
@@ -31,7 +25,10 @@ let cashMovements = [];
 let dailyCashClosures = [];
 let activityLog = [];
 
-const ADMIN_CASH_CODE = "ESAM2026";
+
+const AUTH_USER_EMAILS = {
+  "EsamDo": "admin@esamdo.com"
+};
 
 const filters = {
   branchId: "all",
@@ -67,14 +64,8 @@ const DISCIPLINE_THEMES = {
   "Kickboxing - MMA": { class: "disc-kickboxing" }
 };
 
-/* ============================================================
-   RENOMBRADO VISUAL DE SEDES
-   - El nombre real en BD se mantiene tal cual.
-   - Acá podemos sobreescribir cómo se muestra en pantalla.
-   - Si la sede no está en este mapa, se usa el nombre original.
-   ============================================================ */
 const BRANCH_DISPLAY_OVERRIDES = {
-  // Nombre visual oficial en toda la app. No cambia el valor guardado en Supabase.
+ 
   "Sede Principal": "SEDE PRINCIPAL (Hoyos Rubio)",
   "Sede Centro":    "SEDE PRINCIPAL (Hoyos Rubio)",
   "Sede 1":         "SEDE PRINCIPAL (Hoyos Rubio)",
@@ -143,9 +134,7 @@ const PAYMENT_CONCEPTS = ["Matrícula", "Mensualidad", "Abono", "Otros"];
 const ATTENDANCE_STATUSES = ["presente", "falta", "tardanza", "justificado"];
 const EXPENSE_CATEGORIES = ["Alquiler", "Servicios", "Limpieza", "Sueldos", "Equipamiento", "Marketing", "Transporte", "Otros"];
 
-/* ============================================================
-   INIT
-   ============================================================ */
+
 document.addEventListener("DOMContentLoaded", async () => {
   initTheme();
   updateClock();
@@ -153,6 +142,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const search = document.getElementById("search");
   if (search) search.addEventListener("input", render);
+
+  document.getElementById("loginUser")?.addEventListener("keydown", e => {
+    if (e.key === "Enter") login();
+  });
 
   document.getElementById("loginPassword")?.addEventListener("keydown", e => {
     if (e.key === "Enter") login();
@@ -188,13 +181,20 @@ async function initAuth() {
 }
 
 async function login() {
-  const email = document.getElementById("loginEmail")?.value.trim();
+  const username = document.getElementById("loginUser")?.value.trim();
   const password = document.getElementById("loginPassword")?.value || "";
   const btn = document.getElementById("loginBtn");
 
   setLoginError("");
-  if (!email || !password) {
-    setLoginError("Ingresa correo y contraseña.");
+
+  if (!username || !password) {
+    setLoginError("Ingresa usuario y contraseña.");
+    return;
+  }
+
+  const email = AUTH_USER_EMAILS[username];
+  if (!email) {
+    setLoginError("Usuario incorrecto.");
     return;
   }
 
@@ -211,7 +211,7 @@ async function login() {
     await loadInitialData();
   } catch (error) {
     console.error(error);
-    setLoginError("Credenciales incorrectas o usuario no creado en Supabase Auth.");
+    setLoginError("Usuario o contraseña incorrectos.");
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -243,9 +243,6 @@ function setLoginError(msg) {
   box.classList.toggle("hidden", !msg);
 }
 
-/* ============================================================
-   SUPABASE DATA
-   ============================================================ */
 async function loadInitialData() {
   try {
     showToast("Cargando datos...", "info");
@@ -310,9 +307,7 @@ async function safeAction(fn, successMsg = "Operación realizada.") {
   }
 }
 
-/* ============================================================
-   HELPERS
-   ============================================================ */
+
 function escape(str) {
   if (str == null) return "";
   return String(str)
@@ -452,10 +447,7 @@ function isSameDay(value, isoDate) {
 }
 
 function isDailyCashMovement(m) {
-  // Regla final de caja:
-  // - Todo cobro/venta EN EFECTIVO del día pertenece a CAJA DIARIA.
-  // - La CAJA MENSUAL solo se usa para fondo/gastos operativos o movimientos manuales mensuales.
-  // - Si existe la columna cash_kind en Supabase, ella manda.
+
   const explicitKind = String(m.cash_kind || m.kind || "").toLowerCase();
   if (explicitKind === "daily" || explicitKind === "diaria" || explicitKind === "caja diaria") return true;
   if (explicitKind === "monthly" || explicitKind === "mensual" || explicitKind === "caja mensual") return false;
@@ -467,14 +459,14 @@ function isDailyCashMovement(m) {
 
   const text = `${source} ${category} ${description} ${method}`;
 
-  // Entradas/salidas propias de la caja diaria.
+
   if (text.includes("caja diaria")) return true;
   if (text.includes("cierre diario") || text.includes("cierre de caja diaria")) return true;
   if (text.includes("venta") || text.includes("sale")) return true;
   if (text.includes("pago automático") || text.includes("pago de alumno") || text.includes("payment")) return true;
   if (text.includes("matrícula") || text.includes("matricula") || text.includes("mensualidad") || text.includes("abono")) return true;
 
-  // Si es efectivo y no es un gasto/fondo mensual explícito, lo tratamos como caja diaria.
+  
   if (method.includes("efectivo") && !text.includes("caja mensual") && !text.includes("fondo mensual")) return true;
 
   return false;
@@ -552,9 +544,7 @@ function branchFilterHtml() {
     </select>`;
 }
 
-/* ============================================================
-   UI BASICS
-   ============================================================ */
+
 function showToast(msg, type = "success") {
   const icons = { success:"✓", error:"✕", info:"ℹ" };
   const container = document.getElementById("toast-container");
@@ -595,9 +585,7 @@ function handleOverlayClick(e) {
   if (e.target === document.getElementById("modalOverlay")) closeModal();
 }
 
-/* ============================================================
-   TEMA / RELOJ / NAV
-   ============================================================ */
+
 function initTheme() {
   const saved = localStorage.getItem("esamdo_theme");
   const isDark = saved === "dark" || (!saved && window.matchMedia("(prefers-color-scheme: dark)").matches);
@@ -674,9 +662,6 @@ function setFilter(key, value) {
   render();
 }
 
-/* ============================================================
-   CHARTS
-   ============================================================ */
 function destroyCharts() {
   Object.values(chartInstances).forEach(c => { try { c.destroy(); } catch {} });
   chartInstances = {};
@@ -736,9 +721,7 @@ function buildDoughnutChart(canvasId, labels, data, colors) {
   });
 }
 
-/* ============================================================
-   RENDER MAIN
-   ============================================================ */
+
 function render() {
   const content = document.getElementById("content");
   if (!content || !isBooted) return;
@@ -755,9 +738,7 @@ function render() {
   if (activeTab === "reports") renderReports(content, search);
 }
 
-/* ============================================================
-   DASHBOARD
-   ============================================================ */
+
 function renderDashboard(content) {
   const activeStudents = students.filter(s => s.status !== "retirado");
   const totalPayments = payments.reduce((a,p) => a + Number(p.amount || 0), 0);
@@ -857,9 +838,6 @@ function renderDashboard(content) {
   }, 0);
 }
 
-/* ============================================================
-   STUDENTS
-   ============================================================ */
 function filteredStudents(search) {
   return students.filter(s => {
     if (s.status === "retirado" && filters.studentStatus !== "retirado") return false;
@@ -1514,9 +1492,6 @@ function confirmDeleteStudent(id) {
   });
 }
 
-/* ============================================================
-   SCHEDULES
-   ============================================================ */
 function renderSchedules(content, search) {
   const list = schedules.filter(s => {
     const haystack = [getBranchName(s.branch_id), s.discipline, s.age_group, (s.days || []).join(" "), s.shift].join(" ").toLowerCase();
@@ -1723,9 +1698,6 @@ function renderSchedulesCards(list) {
     </div>`;
 }
 
-/* ============================================================
-   Panel de alumnos por horario (clic en una clase)
-   ============================================================ */
 function openScheduleAttendees(scheduleId) {
   const s = getSchedule(scheduleId);
   if (!s) return;
@@ -2049,9 +2021,7 @@ function confirmDeleteSchedule(id) {
   );
 }
 
-/* ============================================================
-   ATTENDANCE — 2 pantallas: clases del día + pasar lista
-   ============================================================ */
+
 const STATUS_SHORT = { presente:"P", falta:"F", tardanza:"T", justificado:"J" };
 const STATUS_DOT = { presente:"presente", falta:"falta", tardanza:"tardanza", justificado:"justificado" };
 
@@ -2396,11 +2366,6 @@ function togglePendingOnly() {
   render();
 }
 
-/**
- * Marca o actualiza la asistencia. NO usa onConflict (porque la BD del usuario
- * no tiene un constraint UNIQUE para esa combinación). En su lugar busca el
- * registro existente y decide si insert o update.
- */
 async function markAttendanceFor(studentId, scheduleId, status, date) {
   const s = getStudent(studentId);
   if (!s) return;
@@ -2480,9 +2445,7 @@ async function markAttendance(studentId, status) {
   await markAttendanceFor(studentId, s.schedule_id, status, filters.attendanceDate);
 }
 
-/* ============================================================
-   PAYMENTS
-   ============================================================ */
+
 function renderPayments(content, search) {
   const list = payments.filter(p => {
     const haystack = [
@@ -2527,9 +2490,6 @@ function renderPayments(content, search) {
     </div>`;
 }
 
-/* ============================================================
-   Caja: registro automático desde pagos y ventas
-   ============================================================ */
 function isEnrollmentPaid(student) {
   if (!student) return false;
   return payments.some(p => p.student_id === student.id && p.concept === "Matrícula");
@@ -2636,9 +2596,6 @@ async function savePayment(e) {
   }, "Pago registrado.");
 }
 
-/* ============================================================
-   CASH
-   ============================================================ */
 function renderCash(content, search) {
   const selectedDate = filters.cashDate || getTodayIso();
   const branchId = filters.branchId;
@@ -2989,15 +2946,20 @@ function openCashReopenModal() {
     const reason = document.getElementById("openReason").value.trim();
     const closure = getDailyClosure(branchId, dateIso);
 
-    if (code !== ADMIN_CASH_CODE) { showToast("Código de administrador incorrecto.", "error"); return; }
     if (!closure) { showToast("No hay una caja cerrada para esa sede y fecha.", "error"); return; }
     if (!reason) { showToast("Indica el motivo para abrir la caja.", "error"); return; }
+
+    const { data: codeOk, error: codeError } = await db.rpc("verify_cash_code", { input_code: code });
+    if (codeError || codeOk !== true) {
+      showToast("Código de administrador incorrecto.", "error");
+      return;
+    }
 
     await safeAction(async () => {
       const { error } = await db.from("daily_cash_closures").update({
         reopened_at: new Date().toISOString(),
         reopen_reason: reason,
-        reopened_by_code: code
+        reopened_by_code: "validado"
       }).eq("id", closure.id);
       if (error) throw error;
     }, "Caja diaria abierta nuevamente.");
@@ -3005,9 +2967,7 @@ function openCashReopenModal() {
   openModal();
 }
 
-/* ============================================================
-   INVENTORY
-   ============================================================ */
+
 function renderInventory(content, search) {
   const list = inventory.filter(p => {
     const haystack = [p.name].join(" ").toLowerCase();
@@ -3135,9 +3095,7 @@ function openStockAdjustModal() {
   openModal();
 }
 
-/* ============================================================
-   SALES
-   ============================================================ */
+
 function renderSales(content, search) {
   const list = sales.filter(s => {
     const products = (s.sale_items || []).map(i => i.product_name).join(" ");
@@ -3197,9 +3155,7 @@ function renderSales(content, search) {
     </div>`;
 }
 
-/* ============================================================
-   SALES — Carrito multi-producto
-   ============================================================ */
+
 let saleCart = [];
 
 function getCartItem(productId) {
@@ -3538,9 +3494,6 @@ function printReceipt(id) {
   win.document.close();
 }
 
-/* ============================================================
-   REPORTS
-   ============================================================ */
 function renderReports(content, search) {
   const selectedDate = filters.reportDate || getTodayIso();
   const selectedMonth = filters.reportMonth || getCurrentCycle(new Date());
@@ -3713,9 +3666,6 @@ function printReportStyle() {
   return `<style>body{font-family:Arial,sans-serif;padding:32px;color:#111}h1{margin:0;font-size:22px}h2{margin:4px 0 20px;font-size:18px}h3{margin-top:24px}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0}.summary div{border:1px solid #ddd;border-radius:8px;padding:10px}.summary span{display:block;color:#666;font-size:11px;text-transform:uppercase}.summary strong{font-size:16px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border-bottom:1px solid #ddd;text-align:left;padding:8px;font-size:12px}th{background:#f5f5f5;text-transform:uppercase;font-size:10px}</style>`;
 }
 
-/* ===========================================================
-   EXPORTS
-   ============================================================ */
 function exportCSV(rows, filename) {
   const csv = rows.map(row => row.map(cell => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
   const blob = new Blob(["\uFEFF" + csv], { type:"text/csv;charset=utf-8;" });
