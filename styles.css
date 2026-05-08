@@ -41,9 +41,8 @@ body{font-family:var(--font);font-size:14px;line-height:1.5;color:var(--text);ba
 @media(max-width:1200px){.kpi{grid-column:span 6}}@media(max-width:960px){.span-8,.span-6{grid-column:1/-1}.span-4{grid-column:span 6}}@media(max-width:768px){.app{flex-direction:column}.sidebar{width:100%;height:auto;position:static}.sidebar-top{padding:14px}.sidebar-bottom{padding:10px 14px}.content-area{padding:16px}.topbar{padding:12px 16px;height:auto}.kpi,.span-4{grid-column:1/-1}.modal-form{grid-template-columns:1fr}#search{width:100%}#toast-container{bottom:12px;right:12px;left:12px}.toast{max-width:100%}}@media(max-width:640px){.student-metrics{grid-template-columns:1fr}.student-name-row{flex-direction:column}.student-data-item{flex-direction:column;gap:2px}.student-data-item strong{max-width:100%;text-align:left}.history-head{flex-direction:column}.history-time{white-space:normal}}
 
 
-/* ============================================================
-   EXTRA FIXES ESAM-DO
-   ============================================================ */
+
+
 .login-screen.hidden { display:none !important; }
 .app.hidden { display:none !important; }
 button:disabled { opacity:.65; cursor:not-allowed; }
@@ -63,7 +62,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   transition: background var(--transition), color var(--transition);
 }
 .logout-btn:hover { background:var(--danger-soft); color:var(--danger); border-color:var(--danger-border); }
-/* === Schedules: shared === */
+
 .empty-state { padding:32px 12px; text-align:center; color:var(--text-2); font-size:.88rem; border:1px dashed var(--border); border-radius:var(--radius-md); }
 
 .schedule-filters { gap:8px; }
@@ -95,7 +94,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   box-shadow:var(--shadow-sm);
 }
 
-/* === Discipline color tokens (work in light + dark) === */
+
 .disc-karate     { --d-fill:#fdf2f1; --d-line:#c0392b; --d-text:#7a2419; }
 .disc-kickboxing { --d-fill:#fdf6e8; --d-line:#b45309; --d-text:#6d3404; }
 .disc-mma        { --d-fill:#f1efff; --d-line:#6d63d4; --d-text:#372f8a; }
@@ -110,7 +109,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
 .legend-item { display:inline-flex; align-items:center; gap:6px; font-size:.78rem; color:var(--text-2); }
 .legend-swatch { width:10px; height:10px; border-radius:2px; background:var(--d-line); }
 
-/* === Week view === */
+
 .week-view {
   border:1px solid var(--border);
   border-radius:var(--radius-lg);
@@ -195,7 +194,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .week-view { overflow-x:auto; }
 }
 
-/* === Cards view === */
+
 .schedule-grid {
   display:grid;
   grid-template-columns:repeat(auto-fill, minmax(290px, 1fr));
@@ -265,7 +264,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
 .schedule-card-fees strong { color:var(--text); font-weight:600; font-family:var(--mono); }
 .schedule-actions { display:flex; gap:6px; flex-wrap:wrap; }
 
-/* === Modal: day toggles === */
+
 .day-toggle-row { display:flex; gap:6px; flex-wrap:wrap; }
 .day-toggle {
   flex:1 0 60px;
@@ -335,7 +334,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .att-summary { grid-template-columns:repeat(2,1fr); }
 }
 
-/* === Sales: cart === */
+
 .cart-add-row {
   display:grid;
   grid-template-columns:1fr 80px auto;
@@ -470,7 +469,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .cart-add-row .btn { justify-content:center; }
 }
 
-/* === Students: lista compacta + filtros nuevos === */
+
 .students-toolbar {
   display:flex;
   gap:8px;
@@ -556,7 +555,6 @@ button:disabled { opacity:.65; cursor:not-allowed; }
 }
 .active-chip-x:hover { opacity:1; background:rgba(0,0,0,.08); }
 
-/* === Students: lista === */
 .students-list-wrapper {
   background:var(--surface);
   border:1px solid var(--border);
@@ -679,7 +677,6 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .student-row .row-due { grid-column: span 1; }
 }
 
-/* === Panel de attendees (clic en una clase) === */
 .attendees-modal {
   width:min(720px, 95vw);
   max-height:85vh;
@@ -828,7 +825,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .attendees-row .row-due { display:none; }
 }
 
-/* === Attendance: pantalla 1 (agenda del día) === */
+
 .attendance-page { padding:20px 22px; }
 
 .att-toolbar {
@@ -976,7 +973,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .att-day-stats { grid-template-columns:repeat(2, 1fr); }
 }
 
-/* === Attendance: pantalla 2 (pasar lista) === */
+
 .attendance-roll { padding:0; overflow:hidden; border-top:4px solid var(--d-line); }
 
 .class-status-badge {
@@ -1132,7 +1129,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .roll-mark-btn { width:30px; height:28px; font-size:.78rem; }
 }
 
-/* === Chip de matrícula pendiente === */
+
 .row-name-line {
   display:flex;
   align-items:center;
@@ -1159,7 +1156,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
 }
 .enroll-chip:hover { background:var(--warning); color:#fff; }
 
-/* === Form sections (formulario en bloques) === */
+
 .form-section {
   margin-bottom:16px;
   padding-bottom:14px;
@@ -1197,13 +1194,6 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   line-height:1.4;
 }
 
-/* Form fields condicionales (matrícula pagada / retiro) */
-.enroll-payment-field,
-.retired-field {
-  /* JS controla display, esto es fallback */
-}
-
-/* === Banner de retirados === */
 .retired-banner {
   display:flex;
   justify-content:space-between;
@@ -1219,9 +1209,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
 .retired-banner strong { color:var(--text); margin-right:8px; }
 .retired-banner span { color:var(--text-2); }
 
-/* ============================================================
-   STUDENT DETAIL + FINAL STUDENT UX FIXES
-   ============================================================ */
+
 .students-list-header,
 .student-row {
   grid-template-columns:42px minmax(0,1fr) 110px 130px 140px;
@@ -1324,9 +1312,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
 }
 
 
-/* ============================================================
-   FIXES: logo, acciones de horarios, layout de acciones
-   ============================================================ */
+
 .brand-logo,
 .logo-fallback {
   width:40px;
@@ -1400,10 +1386,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   display:flex;
   gap:8px;
 }
-/* ============================================================
-   SCROLL INTERNO PARA LISTAS LARGAS
-   Pagos, Caja, Ventas, Reportes, Inventario
-   ============================================================ */
+
 
 .table-wrapper {
   max-height: 520px;
@@ -1412,7 +1395,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   border-radius: var(--radius-md);
 }
 
-/* Cabecera fija dentro de tablas con scroll */
+
 .table-wrapper table thead th {
   position: sticky;
   top: 0;
@@ -1420,14 +1403,14 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   background: var(--surface);
 }
 
-/* Scroll para reportes / listas tipo historial */
+
 .history-list {
   max-height: 520px;
   overflow-y: auto;
   padding-right: 6px;
 }
 
-/* Scroll más cómodo en pantallas grandes */
+
 @media (min-height: 900px) {
   .table-wrapper,
   .history-list {
@@ -1435,16 +1418,13 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   }
 }
 
-/* Scroll más compacto en laptops pequeñas */
 @media (max-height: 760px) {
   .table-wrapper,
   .history-list {
     max-height: 430px;
   }
 }
-/* ============================================================
-   AJUSTES SOLICITADOS — Inventario sin categoría, scroll y caja diaria/mensual
-   ============================================================ */
+
 .scroll-table {
   max-height: 430px;
   overflow: auto;
@@ -1527,9 +1507,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .scroll-table { max-height: 360px; }
 }
 
-/* ============================================================
-   MEJORAS CAJA / REPORTES / BUSCADOR
-   ============================================================ */
+
 .cash-status-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
@@ -1571,7 +1549,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .main-content, .content-area { padding:0 !important; }
 }
 
-/* === Mejora visual: resumen de caja ordenado === */
+
 .cash-overview-card {
   padding: 18px;
 }
@@ -1650,7 +1628,7 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .cash-overview-grid { grid-template-columns: 1fr; }
 }
 
-/* === Caja: resumen minimalista y compacto === */
+
 .cash-summary-panel {
   padding: 16px;
 }
@@ -1772,3 +1750,4 @@ button:disabled { opacity:.65; cursor:not-allowed; }
   .cash-main-grid,
   .cash-branch-grid { grid-template-columns: 1fr; }
 }
+
