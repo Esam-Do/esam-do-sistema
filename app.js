@@ -23,6 +23,7 @@ let sales = [];
 let cashBoxes = [];
 let cashMovements = [];
 let dailyCashClosures = [];
+let dailyCashOpenings = [];
 let activityLog = [];
 
 
@@ -258,7 +259,7 @@ async function loadInitialData() {
 
 async function refreshData() {
   const [
-    b, sc, st, at, py, inv, sl, cb, cm, closures, logs
+    b, sc, st, at, py, inv, sl, cb, cm, closures, openings, logs
   ] = await Promise.all([
     selectTable("branches", "*", { column:"name" }),
     selectTable("schedules", "*, branches(name)", { column:"start_time" }),
@@ -270,6 +271,7 @@ async function refreshData() {
     selectTable("cash_boxes", "*, branches(name)", { column:"created_at" }),
     selectTable("cash_movements", "*, branches(name)", { column:"date", ascending:false }),
     selectTable("daily_cash_closures", "*, branches(name)", { column:"closed_at", ascending:false }).catch(() => []),
+    selectTable("daily_cash_openings", "*, branches(name)", { column:"opened_at", ascending:false }).catch(() => []),
     selectTable("activity_logs", "*", { column:"created_at", ascending:false }).catch(() => [])
   ]);
 
@@ -283,6 +285,7 @@ async function refreshData() {
   cashBoxes = cb;
   cashMovements = cm;
   dailyCashClosures = closures;
+  dailyCashOpenings = openings;
   activityLog = logs;
 }
 
@@ -2793,7 +2796,7 @@ function updateCashCategoryOptions() {
   const hint = document.getElementById("cashLockHint");
   const branchId = document.getElementById("cBranch")?.value;
   if (hint && branchId && kind === "daily" && isDailyCashClosed(branchId, getTodayIso())) {
-    hint.innerHTML = "⚠️ La caja diaria de hoy está cerrada. No se permiten movimientos manuales hasta reabrirla con código administrador.";
+    hint.innerHTML = "⚠️ La caja diaria de hoy está cerrada. No se permiten movimientos manuales hasta abrirla con código administrador.";
   } else if (hint) {
     hint.textContent = "Usa caja diaria para ventas/recaudación del día. Usa caja mensual para gastos operativos y fondo mensual.";
   }
@@ -2806,7 +2809,6 @@ function openDailyCloseModal() {
   document.getElementById("modalForm").innerHTML = `
     <div class="form-group"><label>Sede</label><select id="closeBranch" onchange="updateDailyClosePreview()">${branchOptions(defaultBranch)}</select></div>
     <div class="form-group"><label>Fecha</label><input type="date" id="closeDate" value="${date}" onchange="updateDailyClosePreview()"></div>
-    <div class="form-group full"><label>Efectivo contado (S/)</label><input type="number" id="closeCounted" min="0" step="0.01" value="0" oninput="updateDailyClosePreview()"></div>
     <div class="form-group full">
       <div class="daily-close-preview" id="dailyClosePreview"></div>
     </div>
@@ -2822,43 +2824,43 @@ function openDailyCloseModal() {
     e.preventDefault();
     const branchId = document.getElementById("closeBranch").value;
     const closeDate = document.getElementById("closeDate").value;
-    const counted = Number(document.getElementById("closeCounted").value || 0);
     const amount = await getFreshDailyCashBalanceForBranch(branchId, closeDate);
     const box = cashBoxes.find(c => c.branch_id === branchId);
+    const note = document.getElementById("closeNote").value.trim();
 
     if (!box) { showToast("No existe caja para esta sede.", "error"); return; }
-    if (isDailyCashClosed(branchId, closeDate)) { showToast("La caja diaria ya está cerrada para esa sede y fecha.", "error"); return; }
-    if (amount <= 0) { showToast("No hay saldo diario para cerrar en esa fecha.", "error"); return; }
-
-    const diff = counted - amount;
-    const note = document.getElementById("closeNote").value.trim();
+    if (!isDailyCashOpen(branchId, closeDate)) { showToast("La caja diaria no está abierta. Debes abrirla con código administrador antes de cerrarla.", "error"); return; }
+    if (amount < 0) { showToast("La caja diaria tiene saldo negativo. Revisa los movimientos antes de cerrar.", "error"); return; }
 
     await safeAction(async () => {
       const { data: closure, error: closureError } = await db.from("daily_cash_closures").insert({
         branch_id: branchId,
         date: closeDate,
         expected_amount: amount,
-        counted_amount: counted,
-        difference_amount: diff,
+        counted_amount: amount,
+        difference_amount: 0,
         note: note || null,
         admin_code_used: null
       }).select().single();
       if (closureError) throw closureError;
 
-      const { error } = await db.from("cash_movements").insert({
-        cash_box_id: box.id,
-        branch_id: branchId,
-        type: "egreso",
-        category: "Cierre de caja diaria",
-        amount,
-        description: `Cierre de caja diaria ${closeDate}. Esperado: ${formatCurrency(amount)} · Contado: ${formatCurrency(counted)} · Diferencia: ${formatCurrency(diff)}. ${note || "Retiro al finalizar el día."}`,
-        source: "cierre diario",
-        payment_method: "Efectivo",
-        cash_kind: "daily",
-        closure_id: closure?.id || null
-      });
-      if (error) throw error;
-    }, "Caja diaria cerrada y reporte guardado.");
+      if (amount > 0) {
+        const { error } = await db.from("cash_movements").insert({
+          cash_box_id: box.id,
+          branch_id: branchId,
+          type: "egreso",
+          category: "Cierre de caja diaria",
+          amount,
+          date: closeDate,
+          description: `Cierre de caja diaria ${closeDate}. Retiro total: ${formatCurrency(amount)}. La caja queda en S/ 0.00. ${note || "Retiro total al finalizar el día."}`,
+          source: "cierre diario",
+          payment_method: "Efectivo",
+          cash_kind: "daily",
+          closure_id: closure?.id || null
+        });
+        if (error) throw error;
+      }
+    }, "Caja diaria cerrada correctamente.");
   };
 
   openModal();
@@ -2869,25 +2871,30 @@ async function updateDailyClosePreview() {
   if (!el) return;
   const branchId = document.getElementById("closeBranch")?.value;
   const date = document.getElementById("closeDate")?.value || getTodayIso();
-  const counted = Number(document.getElementById("closeCounted")?.value || 0);
   const t = getCashTotals(branchId, date);
-  const diff = counted - t.dailyTodayBalance;
-  const closed = isDailyCashClosed(branchId, date);
+  const open = isDailyCashOpen(branchId, date);
   el.innerHTML = `
     <div class="close-summary-grid">
       <div><span>Ingresos diarios</span><strong>${formatCurrency(t.dailyTodayIn)}</strong></div>
       <div><span>Egresos diarios</span><strong>${formatCurrency(t.dailyTodayOut)}</strong></div>
-      <div><span>Esperado a retirar</span><strong>${formatCurrency(t.dailyTodayBalance)}</strong></div>
-      <div><span>Efectivo contado</span><strong>${formatCurrency(counted)}</strong></div>
-      <div><span>Diferencia</span><strong class="${diff === 0 ? "" : diff < 0 ? "danger-text" : "ok-text"}">${formatCurrency(diff)}</strong></div>
-      <div><span>Estado</span><strong>${closed ? "Cerrada" : "Abierta"}</strong></div>
+      <div><span>Total a retirar</span><strong>${formatCurrency(t.dailyTodayBalance)}</strong></div>
+      <div><span>Caja quedará en</span><strong>${formatCurrency(0)}</strong></div>
+      <div><span>Diferencia</span><strong>${formatCurrency(0)}</strong></div>
+      <div><span>Estado</span><strong>${open ? "Abierta" : "Cerrada"}</strong></div>
     </div>
-    <p class="form-hint">Al cerrar, se guarda un historial imprimible y se bloquean movimientos manuales de esa caja hasta reabrirla.</p>`;
+    <p class="form-hint">Al cerrar, se retirará automáticamente todo el efectivo disponible. Si la caja está en S/ 0.00, igual se podrá cerrar sin registrar egreso.</p>`;
 }
 
 async function getFreshDailyCashBalanceForBranch(branchId, dateIso = getTodayIso()) {
   await refreshData();
   return getDailyCashBalanceForBranch(branchId, dateIso);
+}
+
+function getDailyOpening(branchId, dateIso = getTodayIso()) {
+  return dailyCashOpenings.find(o =>
+    o.branch_id === branchId &&
+    String(o.date).slice(0, 10) === dateIso
+  );
 }
 
 function getDailyClosure(branchId, dateIso = getTodayIso()) {
@@ -2898,13 +2905,17 @@ function getDailyClosure(branchId, dateIso = getTodayIso()) {
   );
 }
 
+function isDailyCashOpen(branchId, dateIso = getTodayIso()) {
+  return Boolean(getDailyOpening(branchId, dateIso)) && !getDailyClosure(branchId, dateIso);
+}
+
 function isDailyCashClosed(branchId, dateIso = getTodayIso()) {
-  return Boolean(getDailyClosure(branchId, dateIso));
+  return !isDailyCashOpen(branchId, dateIso);
 }
 
 function getClosureStatusBadge(branchId, dateIso = getTodayIso()) {
-  const closed = isDailyCashClosed(branchId, dateIso);
-  return `<span class="badge ${closed ? "warning" : "ok"}">${closed ? "Caja cerrada" : "Caja abierta"}</span>`;
+  const open = isDailyCashOpen(branchId, dateIso);
+  return `<span class="badge ${open ? "ok" : "warning"}">${open ? "Caja abierta" : "Caja cerrada"}</span>`;
 }
 
 function getCashRows(branchId = "all", dateIso = null, kind = "all") {
@@ -2932,7 +2943,7 @@ function openCashReopenModal() {
     <div class="form-group"><label>Sede</label><select id="openBranch">${branchOptions(defaultBranch)}</select></div>
     <div class="form-group"><label>Fecha</label><input type="date" id="openDate" value="${date}"></div>
     <div class="form-group full"><label>Código administrador</label><input type="password" id="openCode" placeholder="Código único" autocomplete="off"></div>
-    <div class="form-group full"><label>Motivo</label><textarea id="openReason" placeholder="Ej: Corrección autorizada después del cierre"></textarea></div>
+    <div class="form-group full"><label>Motivo</label><textarea id="openReason" placeholder="Ej: Apertura de caja del día / Corrección autorizada"></textarea></div>
     <div class="form-actions">
       <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
       <button class="btn btn-primary" type="submit">Abrir caja</button>
@@ -2946,8 +2957,10 @@ function openCashReopenModal() {
     const reason = document.getElementById("openReason").value.trim();
     const closure = getDailyClosure(branchId, dateIso);
 
-    if (!closure) { showToast("No hay una caja cerrada para esa sede y fecha.", "error"); return; }
-    if (!reason) { showToast("Indica el motivo para abrir la caja.", "error"); return; }
+    if (isDailyCashOpen(branchId, dateIso)) {
+      showToast("La caja diaria ya está abierta para esa sede y fecha.", "error");
+      return;
+    }
 
     const { data: codeOk, error: codeError } = await db.rpc("verify_cash_code", { input_code: code });
     if (codeError || codeOk !== true) {
@@ -2956,13 +2969,23 @@ function openCashReopenModal() {
     }
 
     await safeAction(async () => {
-      const { error } = await db.from("daily_cash_closures").update({
-        reopened_at: new Date().toISOString(),
-        reopen_reason: reason,
-        reopened_by_code: "validado"
-      }).eq("id", closure.id);
-      if (error) throw error;
-    }, "Caja diaria abierta nuevamente.");
+      if (closure) {
+        const { error } = await db.from("daily_cash_closures").update({
+          reopened_at: new Date().toISOString(),
+          reopen_reason: reason || "Reapertura autorizada con código administrador",
+          reopened_by_code: "validado"
+        }).eq("id", closure.id);
+        if (error) throw error;
+      } else {
+        const { error } = await db.from("daily_cash_openings").insert({
+          branch_id: branchId,
+          date: dateIso,
+          admin_code_used: true,
+          reason: reason || "Apertura autorizada con código administrador"
+        });
+        if (error) throw error;
+      }
+    }, "Caja diaria abierta correctamente.");
   };
   openModal();
 }
