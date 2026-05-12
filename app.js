@@ -337,9 +337,22 @@ function formatDate(value) {
 
 function formatDateTime(value) {
   if (!value) return "—";
+
   try {
-    return new Date(value).toLocaleString("es-PE", {
-      day:"2-digit", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit"
+    const raw = String(value);
+
+    // Si viene como fecha simple YYYY-MM-DD, no usar new Date(raw),
+    // porque JavaScript la interpreta en UTC y en Perú puede mostrar el día anterior.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      return formatDate(raw);
+    }
+
+    return new Date(raw).toLocaleString("es-PE", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
     });
   } catch {
     return "—";
@@ -355,7 +368,11 @@ function formatTime(value) {
 }
 
 function getTodayIso() {
-  return new Date().toISOString().split("T")[0];
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function getCurrentCycle(date = new Date()) {
@@ -2628,16 +2645,20 @@ function renderCash(content, search) {
       </div>`;
   }).join("");
 
-  const movements = cashMovements.filter(m => {
-    const haystack = [m.category, m.description, m.source, getBranchName(m.branch_id)].join(" ").toLowerCase();
-    const branchOk = branchId === "all" || m.branch_id === branchId;
-    const typeOk = filters.cashType === "all" || m.type === filters.cashType;
-    const cashKindOk = !filters.cashKind || filters.cashKind === "all" ||
-      (filters.cashKind === "daily" && isDailyCashMovement(m)) ||
-      (filters.cashKind === "monthly" && isMonthlyCashMovement(m));
-    return haystack.includes(search) && branchOk && typeOk && cashKindOk;
-  });
+const movements = cashMovements.filter(m => {
+  const haystack = [m.category, m.description, m.source, getBranchName(m.branch_id)].join(" ").toLowerCase();
 
+  const branchOk = branchId === "all" || m.branch_id === branchId;
+  const dateOk = isSameDay(m.date, selectedDate);
+
+  const typeOk = filters.cashType === "all" || m.type === filters.cashType;
+
+  const cashKindOk = !filters.cashKind || filters.cashKind === "all" ||
+    (filters.cashKind === "daily" && isDailyCashMovement(m)) ||
+    (filters.cashKind === "monthly" && isMonthlyCashMovement(m));
+
+  return haystack.includes(search) && branchOk && dateOk && typeOk && cashKindOk;
+});
   content.innerHTML = `
     <div class="grid">
       <div class="card span-12 cash-summary-panel">
@@ -2700,7 +2721,7 @@ function renderCash(content, search) {
             <tbody>
               ${movements.length ? movements.map(m => `
                 <tr>
-                  <td>${formatDateTime(m.date)}</td>
+                  <td>${formatDate(m.date)}</td>
                   <td>${escape(getBranchName(m.branch_id))}</td>
                   <td><span class="badge neutral">${isDailyCashMovement(m) ? "Diaria" : "Mensual"}</span></td>
                   <td><span class="badge ${m.type === "ingreso" ? "ok" : "warning"}">${escape(m.type)}</span></td>
@@ -2717,11 +2738,15 @@ function renderCash(content, search) {
 }
 
 function openCashMovementModal() {
+  const defaultBranch = filters.branchId !== "all" ? filters.branchId : branches[0]?.id;
+  const movementDate = filters.cashDate || getTodayIso();
+
   document.getElementById("modalTitle").textContent = "Movimiento de caja";
 
   document.getElementById("modalForm").innerHTML = `
-    <div class="form-group"><label>Sede</label><select id="cBranch" onchange="updateCashCategoryOptions()">${branchOptions(branches[0]?.id)}</select></div>
-    <div class="form-group"><label>Caja</label><select id="cKind" onchange="updateCashCategoryOptions()"><option value="monthly">Caja mensual</option><option value="daily">Caja diaria</option></select></div>
+    <div class="form-group"><label>Sede</label><select id="cBranch" onchange="updateCashCategoryOptions()">${branchOptions(defaultBranch)}</select></div>
+    <div class="form-group"><label>Caja</label><select id="cKind" onchange="updateCashCategoryOptions()"><option value="daily">Caja diaria</option><option value="monthly">Caja mensual</option></select></div>
+    <div class="form-group"><label>Fecha del movimiento</label><input type="date" id="cDate" value="${movementDate}" onchange="updateCashCategoryOptions()"></div>
     <div class="form-group"><label>Tipo</label><select id="cType" onchange="updateCashCategoryOptions()"><option value="ingreso">Ingreso</option><option value="egreso">Egreso</option></select></div>
     <div class="form-group"><label>Categoría</label><select id="cCategory"></select></div>
     <div class="form-group"><label>Monto</label><input type="number" id="cAmount" min="0.01" step="0.01" required></div>
@@ -2742,18 +2767,19 @@ function openCashMovementModal() {
     const type = document.getElementById("cType").value;
     const kind = document.getElementById("cKind").value;
     const amount = Number(document.getElementById("cAmount").value);
+    const movementDate = document.getElementById("cDate")?.value || filters.cashDate || getTodayIso();
 
     if (!box) { showToast("No existe caja para esta sede.", "error"); return; }
     if (amount <= 0) { showToast("Monto inválido.", "error"); return; }
+    if (movementDate > getTodayIso()) { showToast("No puedes registrar movimientos en una fecha futura.", "error"); return; }
 
-    const movementDate = getTodayIso();
-    if (kind === "daily" && isDailyCashClosed(branchId, movementDate)) {
-      showToast("La caja diaria está cerrada. Abre la caja con código administrador para hacer movimientos manuales.", "error");
+    if (kind === "daily" && !isDailyCashOpen(branchId, movementDate)) {
+      showToast("La caja diaria de esa fecha está cerrada. Abre la caja con código administrador para hacer movimientos manuales.", "error");
       return;
     }
 
     if (type === "egreso" && kind === "daily") {
-      const available = await getFreshDailyCashBalanceForBranch(branchId);
+      const available = await getFreshDailyCashBalanceForBranch(branchId, movementDate);
       if (amount > available) {
         showToast(`La caja diaria no tiene suficiente saldo. Disponible: ${formatCurrency(available)}.`, "error");
         return;
@@ -2769,6 +2795,7 @@ function openCashMovementModal() {
         type,
         category,
         amount,
+        date: movementDate,
         description: document.getElementById("cDesc").value.trim() || null,
         source,
         payment_method: "Efectivo",
@@ -2782,23 +2809,24 @@ function openCashMovementModal() {
 }
 
 function updateCashCategoryOptions() {
-  const kind = document.getElementById("cKind")?.value || "monthly";
+  const kind = document.getElementById("cKind")?.value || "daily";
   const type = document.getElementById("cType")?.value || "ingreso";
   const select = document.getElementById("cCategory");
   if (!select) return;
   let options = [];
   if (kind === "daily") {
-    options = type === "ingreso" ? ["Ingreso diario", "Venta en efectivo", "Pago de alumno", "Ajuste caja diaria"] : ["Cierre de caja diaria", "Vuelto", "Ajuste caja diaria"];
+    options = type === "ingreso" ? ["Ingreso diario", "Venta en efectivo", "Pago de alumno", "Ajuste caja diaria"] : ["Vuelto", "Ajuste caja diaria"];
   } else {
     options = type === "ingreso" ? ["Apertura mensual", "Aporte a caja mensual", "Ajuste caja mensual"] : EXPENSE_CATEGORIES;
   }
   select.innerHTML = options.map(o => `<option>${escape(o)}</option>`).join("");
   const hint = document.getElementById("cashLockHint");
   const branchId = document.getElementById("cBranch")?.value;
-  if (hint && branchId && kind === "daily" && isDailyCashClosed(branchId, getTodayIso())) {
-    hint.innerHTML = "⚠️ La caja diaria de hoy está cerrada. No se permiten movimientos manuales hasta abrirla con código administrador.";
+  const dateIso = document.getElementById("cDate")?.value || filters.cashDate || getTodayIso();
+  if (hint && branchId && kind === "daily" && !isDailyCashOpen(branchId, dateIso)) {
+    hint.innerHTML = `⚠️ La caja diaria del ${formatDate(dateIso)} está cerrada. No se permiten movimientos manuales hasta abrirla con código administrador.`;
   } else if (hint) {
-    hint.textContent = "Usa caja diaria para ventas/recaudación del día. Usa caja mensual para gastos operativos y fondo mensual.";
+    hint.textContent = `Movimiento para ${formatDate(dateIso)}. Usa caja diaria para ventas/recaudación del día. Usa caja mensual para gastos operativos y fondo mensual.`;
   }
 }
 
@@ -2957,6 +2985,11 @@ function openCashReopenModal() {
     const reason = document.getElementById("openReason").value.trim();
     const closure = getDailyClosure(branchId, dateIso);
 
+    if (dateIso > getTodayIso()) {
+      showToast("No puedes abrir caja de una fecha futura.", "error");
+      return;
+    }
+
     if (isDailyCashOpen(branchId, dateIso)) {
       showToast("La caja diaria ya está abierta para esa sede y fecha.", "error");
       return;
@@ -2976,15 +3009,15 @@ function openCashReopenModal() {
           reopened_by_code: "validado"
         }).eq("id", closure.id);
         if (error) throw error;
-      } else {
-        const { error } = await db.from("daily_cash_openings").insert({
-          branch_id: branchId,
-          date: dateIso,
-          admin_code_used: true,
-          reason: reason || "Apertura autorizada con código administrador"
-        });
-        if (error) throw error;
       }
+
+      const { error: openingError } = await db.from("daily_cash_openings").upsert({
+        branch_id: branchId,
+        date: dateIso,
+        admin_code_used: true,
+        reason: reason || "Apertura autorizada con código administrador"
+      }, { onConflict: "branch_id,date" });
+      if (openingError) throw openingError;
     }, "Caja diaria abierta correctamente.");
   };
   openModal();
@@ -3612,7 +3645,7 @@ function renderReports(content, search) {
             <article class="history-item" data-type="egreso">
               <div class="history-head">
                 <div class="history-title">${escape(m.category || "Gasto")} · ${formatCurrency(m.amount)}</div>
-                <div class="history-time">${formatDateTime(m.date)}</div>
+                <div class="history-time">${formatDate(m.date)}</div>
               </div>
               <div class="history-meta">${escape(getBranchName(m.branch_id))} · ${isDailyCashMovement(m) ? "Caja diaria" : "Caja mensual"} · ${escape(m.description || m.source || "Sin descripción")}</div>
             </article>`).join("") : `<div class="empty-state"><p>No hay gastos de caja en el mes seleccionado.</p></div>`}
@@ -3626,7 +3659,7 @@ function renderReports(content, search) {
             <article class="history-item" data-type="${escape(m.type)}">
               <div class="history-head">
                 <div class="history-title">${escape(m.category)} · ${formatCurrency(m.amount)}</div>
-                <div class="history-time">${formatDateTime(m.date)}</div>
+                <div class="history-time">${formatDate(m.date)}</div>
               </div>
               <div class="history-meta">${escape(getBranchName(m.branch_id))} · ${isDailyCashMovement(m) ? "Caja diaria" : "Caja mensual"} · ${escape(m.description || m.source)}</div>
             </article>`).join("") : `<div class="empty-state"><p>No hay movimientos para ese día.</p></div>`}
@@ -3659,7 +3692,7 @@ function buildPrintableDailyReport(dateIso) {
     </tbody></table>
     <h3>Movimientos</h3>
     <table><thead><tr><th>Hora</th><th>Sede</th><th>Caja</th><th>Tipo</th><th>Categoría</th><th>Descripción</th><th>Monto</th></tr></thead><tbody>
-      ${rows.map(m => `<tr><td>${formatDateTime(m.date)}</td><td>${escape(getBranchName(m.branch_id))}</td><td>${isDailyCashMovement(m) ? "Diaria" : "Mensual"}</td><td>${escape(m.type)}</td><td>${escape(m.category || "")}</td><td>${escape(m.description || m.source || "")}</td><td>${formatCurrency(m.amount)}</td></tr>`).join("") || `<tr><td colspan="7">Sin movimientos.</td></tr>`}
+      ${rows.map(m => `<tr><td>${formatDate(m.date)}</td><td>${escape(getBranchName(m.branch_id))}</td><td>${isDailyCashMovement(m) ? "Diaria" : "Mensual"}</td><td>${escape(m.type)}</td><td>${escape(m.category || "")}</td><td>${escape(m.description || m.source || "")}</td><td>${formatCurrency(m.amount)}</td></tr>`).join("") || `<tr><td colspan="7">Sin movimientos.</td></tr>`}
     </tbody></table>`;
 }
 
@@ -3680,7 +3713,7 @@ function printClosureReport(closureId) {
     <h1>ESAM-DO 2026</h1><h2>Cierre de caja diaria</h2>
     <div class="summary"><div><span>Sede</span><strong>${escape(getBranchName(c.branch_id))}</strong></div><div><span>Fecha</span><strong>${formatDate(c.date)}</strong></div><div><span>Esperado</span><strong>${formatCurrency(c.expected_amount)}</strong></div><div><span>Contado</span><strong>${formatCurrency(c.counted_amount)}</strong></div><div><span>Diferencia</span><strong>${formatCurrency(c.difference_amount)}</strong></div><div><span>Estado</span><strong>${c.reopened_at ? "Reabierta" : "Cerrada"}</strong></div></div>
     <p><strong>Observación:</strong> ${escape(c.note || "Sin observación")}</p>
-    <h3>Movimientos de caja diaria</h3><table><thead><tr><th>Hora</th><th>Tipo</th><th>Categoría</th><th>Descripción</th><th>Monto</th></tr></thead><tbody>${rows.map(m => `<tr><td>${formatDateTime(m.date)}</td><td>${escape(m.type)}</td><td>${escape(m.category || "")}</td><td>${escape(m.description || m.source || "")}</td><td>${formatCurrency(m.amount)}</td></tr>`).join("")}</tbody></table>
+    <h3>Movimientos de caja diaria</h3><table><thead><tr><th>Hora</th><th>Tipo</th><th>Categoría</th><th>Descripción</th><th>Monto</th></tr></thead><tbody>${rows.map(m => `<tr><td>${formatDate(m.date)}</td><td>${escape(m.type)}</td><td>${escape(m.category || "")}</td><td>${escape(m.description || m.source || "")}</td><td>${formatCurrency(m.amount)}</td></tr>`).join("")}</tbody></table>
     <script>window.onload=()=>window.print();<\/script></body></html>`);
   win.document.close();
 }
