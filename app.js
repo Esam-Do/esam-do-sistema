@@ -19,12 +19,15 @@ let schedules = [];
 let attendance = [];
 let payments = [];
 let inventory = [];
+let inventoryVariants = [];
 let sales = [];
 let cashBoxes = [];
 let cashMovements = [];
 let dailyCashClosures = [];
 let dailyCashOpenings = [];
 let activityLog = [];
+let isSavingPayment = false;
+let isSavingSale = false;
 
 
 const AUTH_USER_EMAILS = {
@@ -44,6 +47,8 @@ const filters = {
   scheduleView: "week",
   scheduleShift: "all",
   cashDate: getTodayIso(),
+  paymentDate: getTodayIso(),
+  salesDate: getTodayIso(),
   cashKind: "all",
   reportDate: getTodayIso(),
   reportMonth: getCurrentCycle(new Date())
@@ -102,9 +107,70 @@ function normalizeDayName(raw) {
   return map[clean] || null;
 }
 
+function getScheduleSignature(schedule) {
+  if (!schedule) return "";
+
+  const normalizedDays = (schedule.days || [])
+    .map(d => normalizeDayName(d))
+    .filter(Boolean)
+    .sort((a, b) => WEEK_DAYS.findIndex(w => w.full === a) - WEEK_DAYS.findIndex(w => w.full === b))
+    .join("|");
+
+  return [
+    schedule.branch_id || "",
+    normalizeDisciplineName(schedule.discipline),
+    schedule.shift || "",
+    schedule.age_group || "",
+    normalizedDays,
+    formatTime(schedule.start_time),
+    formatTime(schedule.end_time)
+  ].join("__");
+}
+
+function deduplicateSchedules(list) {
+  const map = new Map();
+
+  (list || []).forEach(schedule => {
+    const key = getScheduleSignature(schedule);
+    if (!key) return;
+
+    if (!map.has(key)) {
+      map.set(key, {
+        ...schedule,
+        _duplicateIds: [schedule.id],
+        _duplicateCount: 1
+      });
+      return;
+    }
+
+    const current = map.get(key);
+    current._duplicateIds.push(schedule.id);
+    current._duplicateCount += 1;
+
+    // Si alguna fila duplicada está activa, el horario visual queda activo.
+    current.active = current.active || schedule.active;
+
+    // Mantiene la capacidad más alta para no bajar cupos por una fila duplicada incompleta.
+    if ((Number(schedule.capacity) || 0) > (Number(current.capacity) || 0)) {
+      current.capacity = schedule.capacity;
+    }
+  });
+
+  return Array.from(map.values());
+}
+
+function getEquivalentScheduleIds(schedule) {
+  const key = getScheduleSignature(schedule);
+  if (!key) return schedule?.id ? [schedule.id] : [];
+  return schedules
+    .filter(s => getScheduleSignature(s) === key)
+    .map(s => s.id);
+}
+
 function getScheduleOccupancy(s) {
-  const enrolled = students.filter(st => st.schedule_id === s.id && st.status !== "retirado").length;
-  const capacity = Number(s.capacity) || 0;
+  const ids = new Set(s?._duplicateIds || getEquivalentScheduleIds(s));
+  const enrolled = students.filter(st => ids.has(st.schedule_id) && st.status !== "retirado").length;
+  const capacity = Number(s?.capacity || 0);
   const ratio = capacity > 0 ? Math.min(enrolled / capacity, 1) : 0;
   return { enrolled, capacity, ratio, percent: Math.round(ratio * 100) };
 }
@@ -248,6 +314,8 @@ async function loadInitialData() {
   try {
     showToast("Cargando datos...", "info");
     await refreshData();
+    const creditUpdates = await processDueStudentCredits();
+    if (creditUpdates > 0) await refreshData();
     isBooted = true;
     updateHeader();
     render();
@@ -259,7 +327,7 @@ async function loadInitialData() {
 
 async function refreshData() {
   const [
-    b, sc, st, at, py, inv, sl, cb, cm, closures, openings, logs
+    b, sc, st, at, py, inv, variants, sl, cb, cm, closures, openings, logs
   ] = await Promise.all([
     selectTable("branches", "*", { column:"name" }),
     selectTable("schedules", "*, branches(name)", { column:"start_time" }),
@@ -267,6 +335,7 @@ async function refreshData() {
     selectTable("attendance", "*, students(name, registration_code), branches(name), schedules(discipline, age_group, days, shift, start_time, end_time)", { column:"date", ascending:false }),
     selectTable("payments", "*, students(name, registration_code, document_number), branches(name)", { column:"date", ascending:false }),
     selectTable("inventory_products", "*", { column:"name" }),
+    selectTable("inventory_variants", "*", { column:"size" }).catch(() => []),
     selectTable("sales", "*, branches(name), sale_items(*)", { column:"date", ascending:false }),
     selectTable("cash_boxes", "*, branches(name)", { column:"created_at" }),
     selectTable("cash_movements", "*, branches(name)", { column:"date", ascending:false }),
@@ -281,6 +350,7 @@ async function refreshData() {
   attendance = at;
   payments = py;
   inventory = inv;
+  inventoryVariants = variants;
   sales = sl;
   cashBoxes = cb;
   cashMovements = cm;
@@ -301,6 +371,8 @@ async function safeAction(fn, successMsg = "Operación realizada.") {
   try {
     await fn();
     await refreshData();
+    const creditUpdates = await processDueStudentCredits();
+    if (creditUpdates > 0) await refreshData();
     closeModal();
     render();
     showToast(successMsg, "success");
@@ -385,6 +457,77 @@ function buildNextPaymentDate(paymentDay, baseDate = null) {
   return next.toISOString().split("T")[0];
 }
 
+
+function compareIsoDates(a, b) {
+  return String(a || "").slice(0, 10).localeCompare(String(b || "").slice(0, 10));
+}
+
+async function processDueStudentCredits() {
+  const today = getTodayIso();
+  let updatedCount = 0;
+
+  for (const st of students) {
+    if (!st || st.status === "retirado") continue;
+
+    let nextDue = String(st.next_payment_date || "").slice(0, 10);
+    if (!nextDue || compareIsoDates(nextDue, today) > 0) continue;
+
+    const monthlyFee = Number(st.monthly_fee || 0);
+    if (monthlyFee <= 0) continue;
+
+    let balance = Number(st.balance || 0);
+    let credit = Number(st.credit_balance || 0);
+    let paidAmount = Number(st.paid_amount || 0);
+    let paymentStatus = st.payment_status || "pending";
+    let changed = false;
+
+    // Si llegó la fecha de pago y el alumno estaba al día, se genera la mensualidad.
+    // Luego se aplica el saldo a favor. Si el crédito alcanza para más de un mes,
+    // se avanzan los ciclos necesarios sin crear ingresos de caja ni pagos duplicados.
+    while (nextDue && compareIsoDates(nextDue, today) <= 0) {
+      if (balance <= 0) {
+        balance = monthlyFee;
+        paidAmount = 0;
+        changed = true;
+      }
+
+      if (credit > 0 && balance > 0) {
+        const appliedFromCredit = Math.min(credit, balance);
+        credit = Number((credit - appliedFromCredit).toFixed(2));
+        balance = Number((balance - appliedFromCredit).toFixed(2));
+        paidAmount = Number((paidAmount + appliedFromCredit).toFixed(2));
+        changed = true;
+      }
+
+      if (balance <= 0) {
+        balance = 0;
+        paymentStatus = "paid";
+        nextDue = buildNextPaymentDate(st.payment_day, nextDue);
+        changed = true;
+      } else {
+        paymentStatus = paidAmount > 0 ? "partial" : "pending";
+        break;
+      }
+    }
+
+    if (!changed) continue;
+
+    const { error } = await db.from("students").update({
+      balance,
+      credit_balance: credit,
+      paid_amount: paidAmount,
+      payment_status: paymentStatus,
+      next_payment_date: nextDue,
+      last_cycle_processed: getCurrentCycle(new Date(today + "T00:00:00"))
+    }).eq("id", st.id);
+
+    if (error) throw error;
+    updatedCount += 1;
+  }
+
+  return updatedCount;
+}
+
 function daysUntil(dateString) {
   if (!dateString) return 9999;
   const today = new Date();
@@ -421,6 +564,144 @@ function getProduct(id) {
   return inventory.find(p => p.id === id);
 }
 
+function getProductVariants(productId) {
+  return inventoryVariants
+    .filter(v => v.product_id === productId)
+    .sort((a, b) => String(a.size || "").localeCompare(String(b.size || ""), "es", { numeric:true }));
+}
+
+function productUsesVariants(productId) {
+  return getProductVariants(productId).length > 0;
+}
+
+function getVariant(id) {
+  return inventoryVariants.find(v => v.id === id);
+}
+
+function getProductDisplayStock(product) {
+  const variants = getProductVariants(product.id);
+  if (variants.length) return variants.reduce((a, v) => a + Number(v.stock || 0), 0);
+  return Number(product.stock || 0);
+}
+
+function getProductDisplayMinStock(product) {
+  const variants = getProductVariants(product.id);
+  if (variants.length) return variants.reduce((a, v) => a + Number(v.min_stock || 0), 0);
+  return Number(product.min_stock || 0);
+}
+
+function getProductDisplayValue(product) {
+  const variants = getProductVariants(product.id);
+  if (variants.length) {
+    return variants.reduce((a, v) => a + Number(v.price || product.price || 0) * Number(v.stock || 0), 0);
+  }
+  return Number(product.price || 0) * Number(product.stock || 0);
+}
+
+function getVariantLabel(variant) {
+  if (!variant) return "";
+  return String(variant.size || "Sin talla").trim();
+}
+
+function buildSaleItemKey(productId, variantId = null) {
+  return variantId ? `${productId}::${variantId}` : `${productId}`;
+}
+
+function getSaleVariantOptions(product) {
+  const variants = getProductVariants(product.id);
+  if (!variants.length) return [];
+  return variants.map(v => ({
+    product,
+    variant: v,
+    key: buildSaleItemKey(product.id, v.id),
+    label: `${product.name} · talla ${getVariantLabel(v)}`,
+    price: Number(v.price || product.price || 0),
+    stock: Number(v.stock || 0),
+    min_stock: Number(v.min_stock || 0)
+  }));
+}
+
+function getSaleOptionByKey(key) {
+  if (!key) return null;
+  const parts = String(key).split("::");
+  const product = getProduct(parts[0]);
+  if (!product) return null;
+  if (parts[1]) {
+    const variant = getVariant(parts[1]);
+    if (!variant) return null;
+    return {
+      product,
+      variant,
+      key,
+      label: `${product.name} · talla ${getVariantLabel(variant)}`,
+      price: Number(variant.price || product.price || 0),
+      stock: Number(variant.stock || 0),
+      min_stock: Number(variant.min_stock || 0)
+    };
+  }
+  return {
+    product,
+    variant: null,
+    key: buildSaleItemKey(product.id),
+    label: product.name,
+    price: Number(product.price || 0),
+    stock: Number(product.stock || 0),
+    min_stock: Number(product.min_stock || 0)
+  };
+}
+
+function getInventorySaleOptions() {
+  return inventory.flatMap(product => {
+    const variants = getSaleVariantOptions(product);
+    if (variants.length) return variants;
+    return [{
+      product,
+      variant: null,
+      key: buildSaleItemKey(product.id),
+      label: product.name,
+      price: Number(product.price || 0),
+      stock: Number(product.stock || 0),
+      min_stock: Number(product.min_stock || 0)
+    }];
+  });
+}
+
+function getProductVariantsEditorRows(productId = null) {
+  const variants = productId ? getProductVariants(productId) : [];
+  if (!variants.length) return "";
+  return variants.map(v => {
+    const price = v.price == null || v.price === "" ? "" : Number(v.price);
+    return `${getVariantLabel(v)} | ${Number(v.stock || 0)} | ${Number(v.min_stock || 0)} | ${price}`;
+  }).join("\n");
+}
+
+function parseVariantRows(raw, defaultPrice = 0) {
+  return String(raw || "")
+    .split(/\n+/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const parts = line.split("|").map(p => p.trim());
+      return {
+        size: parts[0] || "",
+        stock: Number(parts[1] || 0),
+        min_stock: Number(parts[2] || 0),
+        price: parts[3] === "" || parts[3] == null ? null : Number(parts[3] || defaultPrice)
+      };
+    })
+    .filter(v => v.size);
+}
+
+function formatVariantsSummary(product) {
+  const variants = getProductVariants(product.id);
+  if (!variants.length) return `<span class="small-text">Sin tallas</span>`;
+  return variants.map(v => {
+    const stock = Number(v.stock || 0);
+    const cls = stock <= Number(v.min_stock || 0) ? "warning" : "neutral";
+    return `<span class="badge ${cls}" style="margin:2px">${escape(getVariantLabel(v))}: ${stock}</span>`;
+  }).join(" ");
+}
+
 function getPaymentStatusLabel(status) {
   if (status === "paid") return "Pagado";
   if (status === "partial") return "Parcial";
@@ -445,6 +726,8 @@ function isOverdue(student) {
 }
 
 function isLowStock(product) {
+  const variants = getProductVariants(product.id);
+  if (variants.length) return variants.some(v => Number(v.stock || 0) <= Number(v.min_stock || 0));
   return Number(product.stock || 0) <= Number(product.min_stock || 0);
 }
 
@@ -528,6 +811,29 @@ function scheduleOptions(selected = "", branchId = "", discipline = "") {
   let list = schedules.filter(s => s.active !== false);
   if (branchId) list = list.filter(s => s.branch_id === branchId);
   if (discipline) list = list.filter(s => normalizeDisciplineName(s.discipline) === normalizeDisciplineName(discipline));
+
+  // Evita mostrar horarios duplicados en los selects cuando en la base existen filas repetidas
+  // con la misma sede, disciplina, turno, edad, días y hora.
+  const seen = new Map();
+  list.forEach(s => {
+    const normalizedDays = (s.days || [])
+      .map(d => normalizeDayName(d))
+      .filter(Boolean)
+      .join("|");
+
+    const key = [
+      s.branch_id,
+      normalizeDisciplineName(s.discipline),
+      s.shift || "",
+      s.age_group || "",
+      normalizedDays,
+      formatTime(s.start_time),
+      formatTime(s.end_time)
+    ].join("__");
+
+    if (!seen.has(key) || s.id === selected) seen.set(key, s);
+  });
+  list = Array.from(seen.values());
 
   list.sort((a, b) => {
     const byShift = SHIFTS.indexOf(a.shift) - SHIFTS.indexOf(b.shift);
@@ -1279,19 +1585,42 @@ function openStudentModal(id = null, defaults = {}) {
       <div class="form-section-title">Matrícula inicial</div>
       <div class="form-section-grid">
         <div class="form-group"><label>Monto matrícula (S/)</label><input type="number" id="sEnrollFee" min="0" step="0.01" value="${initialEnrollmentFee}"></div>
-        <div class="form-group"><label>Estado</label>
+        <div class="form-group"><label>Estado matrícula</label>
           <select id="sEnrollStatus" onchange="toggleEnrollPaymentFields()">
             <option value="pendiente" selected>Pendiente</option>
             <option value="pagada">Pagada</option>
             <option value="exonerada">Exonerada</option>
           </select>
         </div>
-        <div class="form-group enroll-payment-field"><label>Método de pago</label>
+        <div class="form-group enroll-payment-field"><label>Método de pago matrícula</label>
           <select id="sEnrollMethod">${PAYMENT_METHODS.map(m => `<option>${m}</option>`).join("")}</select>
         </div>
         <div class="form-group full enroll-payment-field">
           <div class="form-hint">
-            Esto solo se usa al registrar un alumno nuevo. Si marcas la matrícula como Pagada, se registrará el cobro una sola vez.
+            Si marcas la matrícula como Pagada, solo se registrará el cobro de matrícula. La mensualidad se controla abajo por separado.
+          </div>
+        </div>
+      </div>
+    </div>` : "";
+
+  const initialMonthlySection = !isEditing ? `
+    <div class="form-section full">
+      <div class="form-section-title">Mensualidad inicial</div>
+      <div class="form-section-grid">
+        <div class="form-group"><label>Estado mensualidad</label>
+          <select id="sInitialMonthlyStatus" onchange="toggleInitialMonthlyFields()">
+            <option value="pendiente" selected>Pendiente</option>
+            <option value="pagada">Pagada</option>
+            <option value="exonerada">Exonerada / incluida</option>
+          </select>
+        </div>
+        <div class="form-group initial-monthly-payment-field"><label>Monto pagado mensualidad (S/)</label><input type="number" id="sInitialMonthlyAmount" min="0" step="0.01" value="${initialMonthlyFee}"></div>
+        <div class="form-group initial-monthly-payment-field"><label>Método de pago mensualidad</label>
+          <select id="sInitialMonthlyMethod">${PAYMENT_METHODS.map(m => `<option>${m}</option>`).join("")}</select>
+        </div>
+        <div class="form-group full">
+          <div class="form-hint">
+            Si la mensualidad queda Pendiente, el alumno aparecerá con deuda desde la fecha de matrícula. Solo si está Pagada o Exonerada/Incluida, el próximo pago pasará al siguiente mes.
           </div>
         </div>
       </div>
@@ -1323,6 +1652,8 @@ function openStudentModal(id = null, defaults = {}) {
 
     ${enrollmentSection}
 
+    ${initialMonthlySection}
+
     <div class="form-section full">
       <div class="form-section-title">Estado del alumno</div>
       <div class="form-section-grid">
@@ -1348,6 +1679,7 @@ function openStudentModal(id = null, defaults = {}) {
 
   document.getElementById("modalForm").onsubmit = saveStudent;
   toggleEnrollPaymentFields();
+  toggleInitialMonthlyFields();
   toggleRetiredFields();
   openModal();
 }
@@ -1358,6 +1690,23 @@ function toggleEnrollPaymentFields() {
   document.querySelectorAll(".enroll-payment-field").forEach(el => {
     el.style.display = show ? "" : "none";
   });
+
+  const feeInput = document.getElementById("sEnrollFee");
+  if (feeInput && status === "exonerada") feeInput.value = 0;
+}
+
+function toggleInitialMonthlyFields() {
+  const status = document.getElementById("sInitialMonthlyStatus")?.value;
+  const show = status === "pagada";
+  document.querySelectorAll(".initial-monthly-payment-field").forEach(el => {
+    el.style.display = show ? "" : "none";
+  });
+
+  const monthlyInput = document.getElementById("sInitialMonthlyAmount");
+  const feeInput = document.getElementById("sFee");
+  if (monthlyInput && feeInput && show && Number(monthlyInput.value || 0) <= 0) {
+    monthlyInput.value = feeInput.value || 0;
+  }
 }
 
 function toggleRetiredFields() {
@@ -1387,6 +1736,8 @@ function applyScheduleFees() {
   if (feeInput) feeInput.value = sc.monthly_fee || 200;
   const enrollInput = document.getElementById("sEnrollFee");
   if (enrollInput) enrollInput.value = sc.enrollment_fee || 100;
+  const initialMonthlyInput = document.getElementById("sInitialMonthlyAmount");
+  if (initialMonthlyInput) initialMonthlyInput.value = sc.monthly_fee || 200;
 }
 
 async function saveStudent(e) {
@@ -1417,17 +1768,28 @@ async function saveStudent(e) {
     payment_day: payDay,
     status,
     notes: document.getElementById("sNotes").value.trim() || null,
-    next_payment_date: current?.next_payment_date || buildNextPaymentDate(payDay, enrollDate),
+    next_payment_date: current?.next_payment_date || enrollDate,
     last_cycle_processed: current?.last_cycle_processed || getCurrentCycle()
   };
 
   let enrollment = 0;
   let enrollStatus = "pendiente";
   let enrollMethod = "Efectivo";
+  let initialMonthlyStatus = "pendiente";
+  let initialMonthlyAmount = 0;
+  let initialMonthlyMethod = "Efectivo";
+
   if (!isEditing) {
     enrollment = Number(document.getElementById("sEnrollFee")?.value || 0);
     enrollStatus = document.getElementById("sEnrollStatus")?.value || "pendiente";
     enrollMethod = document.getElementById("sEnrollMethod")?.value || "Efectivo";
+
+    initialMonthlyStatus = document.getElementById("sInitialMonthlyStatus")?.value || "pendiente";
+    initialMonthlyAmount = Number(document.getElementById("sInitialMonthlyAmount")?.value || 0);
+    initialMonthlyMethod = document.getElementById("sInitialMonthlyMethod")?.value || "Efectivo";
+
+    if (enrollStatus === "exonerada") enrollment = 0;
+
     payload.enrollment_fee = enrollment;
     payload.enrollment_date = enrollDate;
     payload.enrollment_status = enrollStatus;
@@ -1461,17 +1823,44 @@ async function saveStudent(e) {
     showToast("Si la matrícula está pagada, el monto debe ser mayor a 0. Si es gratis, marca como Exonerada.", "error");
     return;
   }
+  if (!isEditing && initialMonthlyStatus === "pagada" && initialMonthlyAmount <= 0) {
+    showToast("Si la mensualidad inicial está pagada, el monto debe ser mayor a 0.", "error");
+    return;
+  }
 
   if (!id) {
     payload.registration_code = await generateRegistrationCode();
-    payload.paid_amount = 0;
-    payload.balance = monthly;
     payload.credit_balance = 0;
-    payload.payment_status = "pending";
-    payload.last_payment_date = enrollDate;
+    payload.last_payment_date = null;
+
+    if (initialMonthlyStatus === "pagada") {
+      const applied = Math.min(initialMonthlyAmount, monthly);
+      const extra = Math.max(initialMonthlyAmount - monthly, 0);
+      const balance = Math.max(monthly - applied, 0);
+
+      payload.paid_amount = Number(applied.toFixed(2));
+      payload.balance = Number(balance.toFixed(2));
+      payload.credit_balance = Number(extra.toFixed(2));
+      payload.payment_status = balance === 0 ? "paid" : "partial";
+      payload.last_payment_date = enrollDate;
+      payload.next_payment_date = balance === 0 ? buildNextPaymentDate(payDay, enrollDate) : enrollDate;
+    } else if (initialMonthlyStatus === "exonerada") {
+      payload.paid_amount = 0;
+      payload.balance = 0;
+      payload.payment_status = "paid";
+      payload.next_payment_date = buildNextPaymentDate(payDay, enrollDate);
+      payload.last_payment_date = enrollDate;
+    } else {
+      payload.paid_amount = 0;
+      payload.balance = monthly;
+      payload.payment_status = "pending";
+      payload.next_payment_date = enrollDate;
+      payload.last_payment_date = null;
+    }
   }
 
   const shouldChargeEnrollment = !isEditing && enrollStatus === "pagada" && enrollment > 0;
+  const shouldChargeInitialMonthly = !isEditing && initialMonthlyStatus === "pagada" && initialMonthlyAmount > 0;
 
   await safeAction(async () => {
     let savedStudentId = id;
@@ -1497,6 +1886,19 @@ async function saveStudent(e) {
       });
       if (payError) throw payError;
     }
+
+    if (shouldChargeInitialMonthly && savedStudentId) {
+      const { error: monthlyPayError } = await db.from("payments").insert({
+        student_id: savedStudentId,
+        branch_id: payload.branch_id,
+        date: enrollDate,
+        amount: initialMonthlyAmount,
+        method: initialMonthlyMethod,
+        concept: "Mensualidad",
+        reference: null
+      });
+      if (monthlyPayError) throw monthlyPayError;
+    }
   }, id ? "Alumno actualizado." : "Alumno registrado.");
 }
 
@@ -1513,7 +1915,7 @@ function confirmDeleteStudent(id) {
 }
 
 function renderSchedules(content, search) {
-  const list = schedules.filter(s => {
+  const filteredSchedules = schedules.filter(s => {
     const haystack = [getBranchName(s.branch_id), s.discipline, s.age_group, (s.days || []).join(" "), s.shift].join(" ").toLowerCase();
     return haystack.includes(search) &&
       filterByBranch(s) &&
@@ -1521,7 +1923,11 @@ function renderSchedules(content, search) {
       (filters.scheduleShift === "all" || s.shift === filters.scheduleShift);
   });
 
-  const activeList = schedules.filter(s => s.active);
+  // Evita duplicados visuales en la pantalla de Horarios.
+  // Si en Supabase existen filas repetidas con la misma sede, disciplina, turno, días y hora,
+  // se muestran como un solo horario sin borrar datos ni afectar alumnos ya asignados.
+  const list = deduplicateSchedules(filteredSchedules);
+  const activeList = deduplicateSchedules(schedules.filter(s => s.active));
   const totalEnrolled = activeList.reduce((sum, s) => sum + getScheduleOccupancy(s).enrolled, 0);
   const totalCapacity = activeList.reduce((sum, s) => sum + (Number(s.capacity) || 0), 0);
   const avgOccupancy = totalCapacity > 0 ? Math.round((totalEnrolled / totalCapacity) * 100) : 0;
@@ -1723,8 +2129,9 @@ function openScheduleAttendees(scheduleId) {
   if (!s) return;
   closeScheduleAttendees();
 
+  const equivalentIds = new Set(getEquivalentScheduleIds(s));
   const enrolled = students
-    .filter(st => st.schedule_id === scheduleId && st.status !== "retirado")
+    .filter(st => equivalentIds.has(st.schedule_id) && st.status !== "retirado")
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 
   const o = getScheduleOccupancy(s);
@@ -2062,9 +2469,15 @@ function scheduleRunsOn(schedule, isoDate) {
 }
 
 function getClassesForDay(isoDate) {
-  return schedules
-    .filter(s => s.active && scheduleRunsOn(s, isoDate) && filterByBranch(s))
-    .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)));
+  return deduplicateSchedules(
+    schedules.filter(s => s.active && scheduleRunsOn(s, isoDate) && filterByBranch(s))
+  ).sort((a, b) => {
+    const byTime = String(a.start_time).localeCompare(String(b.start_time));
+    if (byTime !== 0) return byTime;
+    const byDiscipline = normalizeDisciplineName(a.discipline).localeCompare(normalizeDisciplineName(b.discipline));
+    if (byDiscipline !== 0) return byDiscipline;
+    return String(a.age_group || "").localeCompare(String(b.age_group || ""));
+  });
 }
 
 function getClassStatus(schedule, isoDate) {
@@ -2095,8 +2508,17 @@ function formatTimeUntil(minutes) {
 }
 
 function getEnrolledForSchedule(scheduleId) {
+  const sched = getSchedule(scheduleId);
+  const equivalentIds = sched ? getEquivalentScheduleIds(sched) : [scheduleId];
+  const seen = new Set();
+
   return students
-    .filter(s => s.schedule_id === scheduleId && s.status !== "retirado")
+    .filter(s => equivalentIds.includes(s.schedule_id) && s.status !== "retirado")
+    .filter(s => {
+      if (seen.has(s.id)) return false;
+      seen.add(s.id);
+      return true;
+    })
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 }
 
@@ -2109,9 +2531,12 @@ function getStudentLast5(studentId, beforeIso) {
 }
 
 function findAttendanceRecord(studentId, scheduleId, isoDate) {
+  const sched = getSchedule(scheduleId);
+  const equivalentIds = sched ? getEquivalentScheduleIds(sched) : [scheduleId];
+
   return attendance.find(a =>
     a.student_id === studentId &&
-    a.schedule_id === scheduleId &&
+    equivalentIds.includes(a.schedule_id) &&
     String(a.date).slice(0, 10) === isoDate
   );
 }
@@ -2467,12 +2892,15 @@ async function markAttendance(studentId, status) {
 
 
 function renderPayments(content, search) {
+  const selectedDate = filters.paymentDate || getTodayIso();
   const list = payments.filter(p => {
     const haystack = [
       p.students?.name, p.students?.registration_code, p.students?.document_number,
       p.method, p.concept, p.reference, getBranchName(p.branch_id)
     ].join(" ").toLowerCase();
-    return haystack.includes(search) && filterByBranch(p);
+
+    const dateOk = selectedDate === "all" || isSameDay(p.date, selectedDate);
+    return haystack.includes(search) && filterByBranch(p) && dateOk;
   });
 
   const totalPending = students.reduce((a, s) => a + Number(s.balance || 0), 0);
@@ -2485,7 +2913,13 @@ function renderPayments(content, search) {
       <div class="card kpi"><div class="kpi-label">Pendientes</div><div class="kpi-value">${students.filter(s => s.payment_status === "pending").length}</div><div class="kpi-help">Sin completar</div></div>
 
       <div class="card span-12">
-        <div class="filters-bar">${branchFilterHtml()}</div>
+        <div class="filters-bar">
+          ${branchFilterHtml()}
+          <input class="filter-select" type="date" value="${selectedDate === "all" ? getTodayIso() : selectedDate}" onchange="setFilter('paymentDate', this.value)">
+          <button class="btn btn-secondary btn-sm" onclick="setFilter('paymentDate', getTodayIso())">Hoy</button>
+          <button class="btn btn-ghost btn-sm" onclick="setFilter('paymentDate', 'all')">Ver todo</button>
+          <span class="small-text">${selectedDate === "all" ? "Mostrando todos los pagos" : `Pagos del ${formatDate(selectedDate)}`}</span>
+        </div>
 
         <div class="section-title">Historial de pagos</div>
         <div class="table-wrapper scroll-table tall-scroll">
@@ -2571,49 +3005,85 @@ function openPaymentModal(studentId = null) {
 async function savePayment(e) {
   e.preventDefault();
 
-  const studentEl = document.getElementById("pStudent");
-  const studentId = studentEl.value || studentEl.options[studentEl.selectedIndex]?.value;
-  const student = getStudent(studentId);
-  const amount = Number(document.getElementById("pAmount").value);
-  const date = document.getElementById("pDate").value;
-  const method = document.getElementById("pMethod").value;
-  const concept = document.getElementById("pConcept").value;
+  if (isSavingPayment) return;
+  isSavingPayment = true;
 
-  if (!student || amount <= 0) {
-    showToast("Selecciona alumno y monto válido.", "error");
-    return;
+  const form = e.currentTarget || e.target;
+  const submitBtn = form?.querySelector('button[type="submit"]');
+  const originalBtnText = submitBtn ? submitBtn.textContent : "Guardar pago";
+
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Guardando...";
   }
 
-  const oldBalance = Number(student.balance || 0);
-  const applied = Math.min(amount, oldBalance);
-  const extra = Math.max(amount - oldBalance, 0);
-  const newBalance = Math.max(oldBalance - applied, 0);
-  const newPaid = Number(student.paid_amount || 0) + applied;
-  const newCredit = Number(student.credit_balance || 0) + extra;
-  const newStatus = newBalance === 0 ? "paid" : newPaid > 0 ? "partial" : "pending";
+  try {
+    const studentEl = document.getElementById("pStudent");
+    const studentId = studentEl.value || studentEl.options[studentEl.selectedIndex]?.value;
+    const student = getStudent(studentId);
+    const amount = Number(document.getElementById("pAmount").value);
+    const date = document.getElementById("pDate").value;
+    const method = document.getElementById("pMethod").value;
+    const concept = document.getElementById("pConcept").value;
+    const reference = document.getElementById("pRef").value.trim() || null;
 
-  await safeAction(async () => {
-    const { error: payError } = await db.from("payments").insert({
-      student_id: student.id,
-      branch_id: student.branch_id,
-      date,
-      amount,
-      method,
-      concept,
-      reference: document.getElementById("pRef").value.trim() || null
-    });
-    if (payError) throw payError;
+    if (!student || amount <= 0) {
+      showToast("Selecciona alumno y monto válido.", "error");
+      return;
+    }
 
-    const { error: studentError } = await db.from("students").update({
-      paid_amount: newPaid,
-      balance: newBalance,
-      credit_balance: newCredit,
-      payment_status: newStatus,
-      last_payment_date: date,
-      next_payment_date: newStatus === "paid" ? buildNextPaymentDate(student.payment_day, date) : student.next_payment_date
-    }).eq("id", student.id);
-    if (studentError) throw studentError;
-  }, "Pago registrado.");
+    // Protección extra en frontend: evita registrar dos veces el mismo pago exacto.
+    const duplicate = payments.find(p =>
+      p.student_id === student.id &&
+      String(p.date).slice(0, 10) === date &&
+      String(p.concept || "") === concept &&
+      String(p.method || "") === method &&
+      Number(p.amount || 0) === amount &&
+      String(p.reference || "") === String(reference || "")
+    );
+
+    if (duplicate) {
+      showToast("Este pago ya fue registrado. No se guardó duplicado.", "error");
+      return;
+    }
+
+    const oldBalance = Number(student.balance || 0);
+    const applied = Math.min(amount, oldBalance);
+    const extra = Math.max(amount - oldBalance, 0);
+    const newBalance = Math.max(oldBalance - applied, 0);
+    const newPaid = Number(student.paid_amount || 0) + applied;
+    const newCredit = Number(student.credit_balance || 0) + extra;
+    const newStatus = newBalance === 0 ? "paid" : newPaid > 0 ? "partial" : "pending";
+
+    await safeAction(async () => {
+      const { error: payError } = await db.from("payments").insert({
+        student_id: student.id,
+        branch_id: student.branch_id,
+        date,
+        amount,
+        method,
+        concept,
+        reference
+      });
+      if (payError) throw payError;
+
+      const { error: studentError } = await db.from("students").update({
+        paid_amount: newPaid,
+        balance: newBalance,
+        credit_balance: newCredit,
+        payment_status: newStatus,
+        last_payment_date: date,
+        next_payment_date: newStatus === "paid" ? buildNextPaymentDate(student.payment_day, date) : student.next_payment_date
+      }).eq("id", student.id);
+      if (studentError) throw studentError;
+    }, "Pago registrado.");
+  } finally {
+    isSavingPayment = false;
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalBtnText;
+    }
+  }
 }
 
 function renderCash(content, search) {
@@ -2645,20 +3115,17 @@ function renderCash(content, search) {
       </div>`;
   }).join("");
 
-const movements = cashMovements.filter(m => {
-  const haystack = [m.category, m.description, m.source, getBranchName(m.branch_id)].join(" ").toLowerCase();
+  const movements = cashMovements.filter(m => {
+    const haystack = [m.category, m.description, m.source, getBranchName(m.branch_id)].join(" ").toLowerCase();
+    const branchOk = branchId === "all" || m.branch_id === branchId;
+    const dateOk = isSameDay(m.date, selectedDate);
+    const typeOk = filters.cashType === "all" || m.type === filters.cashType;
+    const cashKindOk = !filters.cashKind || filters.cashKind === "all" ||
+      (filters.cashKind === "daily" && isDailyCashMovement(m)) ||
+      (filters.cashKind === "monthly" && isMonthlyCashMovement(m));
+    return haystack.includes(search) && branchOk && dateOk && typeOk && cashKindOk;
+  });
 
-  const branchOk = branchId === "all" || m.branch_id === branchId;
-  const dateOk = isSameDay(m.date, selectedDate);
-
-  const typeOk = filters.cashType === "all" || m.type === filters.cashType;
-
-  const cashKindOk = !filters.cashKind || filters.cashKind === "all" ||
-    (filters.cashKind === "daily" && isDailyCashMovement(m)) ||
-    (filters.cashKind === "monthly" && isMonthlyCashMovement(m));
-
-  return haystack.includes(search) && branchOk && dateOk && typeOk && cashKindOk;
-});
   content.innerHTML = `
     <div class="grid">
       <div class="card span-12 cash-summary-panel">
@@ -3024,18 +3491,127 @@ function openCashReopenModal() {
 }
 
 
+
+function getProductVariantEditorData(productId = null) {
+  return productId ? getProductVariants(productId).map(v => ({
+    id: v.id,
+    size: getVariantLabel(v),
+    stock: Number(v.stock || 0),
+    min_stock: Number(v.min_stock || 0),
+    price: v.price == null || v.price === "" ? "" : Number(v.price)
+  })) : [];
+}
+
+function renderVariantRowsHtml(rows = []) {
+  const list = Array.isArray(rows) && rows.length ? rows : [{ size:"", stock:0, min_stock:0, price:"" }];
+  return list.map(row => renderVariantRowHtml(row)).join("");
+}
+
+function renderVariantRowHtml(row = {}) {
+  const size = escape(row.size || "");
+  const stock = row.stock ?? 0;
+  const minStock = row.min_stock ?? 0;
+  const price = row.price ?? "";
+  return `
+    <div class="variant-row" style="display:grid;grid-template-columns:1.2fr .8fr .8fr 1fr 36px;gap:8px;margin-bottom:8px;align-items:center">
+      <input class="variant-size" type="text" placeholder="Ej: 120, S, M, L" value="${size}">
+      <input class="variant-stock" type="number" min="0" step="1" value="${stock}">
+      <input class="variant-min-stock" type="number" min="0" step="1" value="${minStock}">
+      <input class="variant-price" type="number" min="0.01" step="0.01" placeholder="Base" value="${price}">
+      <button type="button" class="icon-btn" onclick="removeVariantRow(this)" title="Quitar talla">×</button>
+    </div>`;
+}
+
+function toggleProductVariantMode() {
+  const mode = document.getElementById("prdUsesVariants")?.value || "no";
+  const useVariants = mode === "yes";
+  const variantsBox = document.getElementById("variantsBox");
+  const generalStockBox = document.getElementById("generalStockBox");
+  const generalMinBox = document.getElementById("generalMinBox");
+  if (variantsBox) variantsBox.style.display = useVariants ? "" : "none";
+  if (generalStockBox) generalStockBox.style.display = useVariants ? "none" : "";
+  if (generalMinBox) generalMinBox.style.display = useVariants ? "none" : "";
+
+  if (useVariants) {
+    const rows = document.getElementById("variantRows");
+    if (rows && !rows.querySelector(".variant-row")) rows.innerHTML = renderVariantRowHtml();
+  }
+}
+
+function addVariantRow(values = {}) {
+  const rows = document.getElementById("variantRows");
+  if (!rows) return;
+  rows.insertAdjacentHTML("beforeend", renderVariantRowHtml(values));
+}
+
+function removeVariantRow(btn) {
+  const row = btn?.closest(".variant-row");
+  if (row) row.remove();
+  const rows = document.getElementById("variantRows");
+  if (rows && !rows.querySelector(".variant-row")) rows.innerHTML = renderVariantRowHtml();
+}
+
+function addSuggestedVariants() {
+  const name = (document.getElementById("prdName")?.value || "").toLowerCase();
+  const rows = document.getElementById("variantRows");
+  if (!rows) return;
+
+  let suggestions = ["S", "M", "L", "XL"];
+  if (name.includes("kimono") || name.includes("ki") || name.includes("karategui") || name.includes("dobok")) {
+    suggestions = ["100", "110", "120", "130", "140", "150", "160", "170", "180"];
+  }
+  if (name.includes("guante") || name.includes("canillera") || name.includes("protector")) {
+    suggestions = ["XS", "S", "M", "L", "XL"];
+  }
+
+  rows.innerHTML = suggestions.map(size => renderVariantRowHtml({ size, stock:0, min_stock:0, price:"" })).join("");
+}
+
+function collectVariantRowsFromForm() {
+  const mode = document.getElementById("prdUsesVariants")?.value || "no";
+  if (mode !== "yes") return [];
+
+  const rows = Array.from(document.querySelectorAll("#variantRows .variant-row"));
+  const values = rows.map(row => {
+    const size = row.querySelector(".variant-size")?.value.trim() || "";
+    const stock = Number(row.querySelector(".variant-stock")?.value || 0);
+    const min_stock = Number(row.querySelector(".variant-min-stock")?.value || 0);
+    const priceRaw = row.querySelector(".variant-price")?.value;
+    return {
+      size,
+      stock,
+      min_stock,
+      price: priceRaw === "" || priceRaw == null ? null : Number(priceRaw)
+    };
+  }).filter(v => v.size);
+
+  const seen = new Set();
+  return values.filter(v => {
+    const key = v.size.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+
 function renderInventory(content, search) {
   const list = inventory.filter(p => {
-    const haystack = [p.name].join(" ").toLowerCase();
+    const variantsText = getProductVariants(p.id).map(v => v.size).join(" ");
+    const haystack = [p.name, variantsText].join(" ").toLowerCase();
     return haystack.includes(search) && (filters.stock === "all" || (filters.stock === "low" && isLowStock(p)));
   });
+
+  const totalUnits = inventory.reduce((a, p) => a + getProductDisplayStock(p), 0);
+  const totalValue = inventory.reduce((a, p) => a + getProductDisplayValue(p), 0);
+  const variantsCount = inventoryVariants.length;
 
   content.innerHTML = `
     <div class="grid">
       <div class="card kpi"><div class="kpi-label">Productos</div><div class="kpi-value">${inventory.length}</div><div class="kpi-help">Registrados</div></div>
-      <div class="card kpi"><div class="kpi-label">Stock crítico</div><div class="kpi-value">${inventory.filter(isLowStock).length}</div><div class="kpi-help">Reponer</div></div>
-      <div class="card kpi"><div class="kpi-label">Unidades</div><div class="kpi-value">${inventory.reduce((a,p) => a + Number(p.stock || 0), 0)}</div><div class="kpi-help">Disponibles</div></div>
-      <div class="card kpi"><div class="kpi-label">Valor inventario</div><div class="kpi-value mono">${formatCurrency(inventory.reduce((a,p) => a + Number(p.price || 0) * Number(p.stock || 0), 0))}</div><div class="kpi-help">Precio × stock</div></div>
+      <div class="card kpi"><div class="kpi-label">Tallas / variantes</div><div class="kpi-value">${variantsCount}</div><div class="kpi-help">Stock separado</div></div>
+      <div class="card kpi"><div class="kpi-label">Unidades</div><div class="kpi-value">${totalUnits}</div><div class="kpi-help">Disponibles</div></div>
+      <div class="card kpi"><div class="kpi-label">Valor inventario</div><div class="kpi-value mono">${formatCurrency(totalValue)}</div><div class="kpi-help">Precio × stock</div></div>
 
       <div class="card span-12">
         <div class="filters-bar">
@@ -3047,21 +3623,26 @@ function renderInventory(content, search) {
 
         <div class="table-wrapper scroll-table">
           <table>
-            <thead><tr><th>Producto</th><th>Precio</th><th>Stock</th><th>Mínimo</th><th>Valor</th><th>Estado</th><th></th></tr></thead>
+            <thead><tr><th>Producto</th><th>Precio base</th><th>Stock total</th><th>Mínimo total</th><th>Tallas / variantes</th><th>Valor</th><th>Estado</th><th></th></tr></thead>
             <tbody>
-              ${list.length ? list.map(p => `
+              ${list.length ? list.map(p => {
+                const stock = getProductDisplayStock(p);
+                const minStock = getProductDisplayMinStock(p);
+                return `
                 <tr>
-                  <td>${escape(p.name)}</td>
+                  <td><strong>${escape(p.name)}</strong></td>
                   <td class="mono">${formatCurrency(p.price)}</td>
-                  <td><strong>${p.stock}</strong></td>
-                  <td>${p.min_stock}</td>
-                  <td class="mono">${formatCurrency(Number(p.price) * Number(p.stock))}</td>
+                  <td><strong>${stock}</strong></td>
+                  <td>${minStock}</td>
+                  <td>${formatVariantsSummary(p)}</td>
+                  <td class="mono">${formatCurrency(getProductDisplayValue(p))}</td>
                   <td><span class="badge ${isLowStock(p) ? "warning" : "neutral"}">${isLowStock(p) ? "Reponer" : "Estable"}</span></td>
                   <td style="display:flex;gap:4px;padding-right:0">
                     <button class="btn btn-ghost btn-sm btn-icon" onclick="openProductModal('${p.id}')">✎</button>
                     <button class="btn btn-danger btn-sm btn-icon" onclick="confirmDeleteProduct('${p.id}')">✕</button>
                   </td>
-                </tr>`).join("") : `<tr><td colspan="7"><div class="empty-state"><p>No se encontraron productos.</p></div></td></tr>`}
+                </tr>`;
+              }).join("") : `<tr><td colspan="8"><div class="empty-state"><p>No se encontraron productos.</p></div></td></tr>`}
             </tbody>
           </table>
         </div>
@@ -3072,28 +3653,61 @@ function renderInventory(content, search) {
 function openProductModal(id = null) {
   const p = id ? getProduct(id) : null;
   editingId = id;
+  const existingVariants = getProductVariantEditorData(id);
+  const usesVariants = existingVariants.length > 0;
 
   document.getElementById("modalTitle").textContent = id ? "Editar producto" : "Agregar producto";
 
   document.getElementById("modalForm").innerHTML = `
-    <div class="form-group full"><label>Producto</label><input type="text" id="prdName" required value="${escape(p?.name || "")}" placeholder="Ej: Cinturón, guantes, uniforme"></div>
-    <div class="form-group"><label>Precio (S/)</label><input type="number" id="prdPrice" required min="0.01" step="0.01" value="${p?.price || ""}"></div>
-    <div class="form-group"><label>Stock</label><input type="number" id="prdStock" required min="0" value="${p?.stock ?? ""}"></div>
-    <div class="form-group full"><label>Stock mínimo</label><input type="number" id="prdMin" required min="0" value="${p?.min_stock ?? ""}"></div>
+    <div class="form-group full"><label>Producto</label><input type="text" id="prdName" required value="${escape(p?.name || "")}" placeholder="Ej: Kimono, guantes, canilleras"></div>
+    <div class="form-group"><label>Precio base (S/)</label><input type="number" id="prdPrice" required min="0.01" step="0.01" value="${p?.price || ""}"></div>
+    <div class="form-group"><label>Control de stock</label>
+      <select id="prdUsesVariants" onchange="toggleProductVariantMode()">
+        <option value="no" ${usesVariants ? "" : "selected"}>Stock general, sin tallas</option>
+        <option value="yes" ${usesVariants ? "selected" : ""}>Separar stock por tallas / variantes</option>
+      </select>
+    </div>
+    <div class="form-group" id="generalStockBox"><label>Stock general</label><input type="number" id="prdStock" required min="0" value="${p?.stock ?? 0}"></div>
+    <div class="form-group" id="generalMinBox"><label>Stock mínimo general</label><input type="number" id="prdMin" required min="0" value="${p?.min_stock ?? 0}"></div>
+
+    <div class="form-group full" id="variantsBox" style="display:none">
+      <label>Tallas / variantes</label>
+      <div class="form-hint" style="margin-bottom:10px">Agrega una fila por cada talla. Cada talla tendrá su propio stock. El precio puede quedar vacío para usar el precio base.</div>
+      <div style="display:grid;grid-template-columns:1.2fr .8fr .8fr 1fr 36px;gap:8px;margin-bottom:6px;color:var(--text-3);font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em">
+        <div>Talla</div><div>Stock</div><div>Mínimo</div><div>Precio</div><div></div>
+      </div>
+      <div id="variantRows">${renderVariantRowsHtml(existingVariants)}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <button type="button" class="btn btn-secondary btn-sm" onclick="addVariantRow()">+ Agregar talla</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addSuggestedVariants()">Usar tallas sugeridas</button>
+      </div>
+    </div>
+
     <div class="form-actions">
       <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
       <button type="submit" class="btn btn-primary">Guardar producto</button>
     </div>`;
 
+  toggleProductVariantMode();
+
   document.getElementById("modalForm").onsubmit = async e => {
     e.preventDefault();
+
+    const basePrice = Number(document.getElementById("prdPrice").value);
+    const variantsPayload = collectVariantRowsFromForm();
+    const variantSizes = variantsPayload.map(v => String(v.size || "").trim().toLowerCase());
+    if (variantSizes.length !== new Set(variantSizes).size) {
+      showToast("Hay tallas repetidas. Usa una sola fila por talla.", "error");
+      return;
+    }
+    const hasVariants = variantsPayload.length > 0;
 
     const payload = {
       name: document.getElementById("prdName").value.trim(),
       category: "General",
-      price: Number(document.getElementById("prdPrice").value),
-      stock: Number(document.getElementById("prdStock").value),
-      min_stock: Number(document.getElementById("prdMin").value),
+      price: basePrice,
+      stock: hasVariants ? variantsPayload.reduce((a, v) => a + Number(v.stock || 0), 0) : Number(document.getElementById("prdStock").value),
+      min_stock: hasVariants ? variantsPayload.reduce((a, v) => a + Number(v.min_stock || 0), 0) : Number(document.getElementById("prdMin").value),
       active: true
     };
 
@@ -3102,11 +3716,38 @@ function openProductModal(id = null) {
       return;
     }
 
+    if (variantsPayload.some(v => v.stock < 0 || v.min_stock < 0 || (v.price != null && v.price <= 0))) {
+      showToast("Revisa las tallas: stock, mínimo y precio deben ser válidos.", "error");
+      return;
+    }
+
     await safeAction(async () => {
-      const result = id
-        ? await db.from("inventory_products").update(payload).eq("id", id)
-        : await db.from("inventory_products").insert(payload);
-      if (result.error) throw result.error;
+      let productId = id;
+      if (id) {
+        const { error } = await db.from("inventory_products").update(payload).eq("id", id);
+        if (error) throw error;
+      } else {
+        const { data: created, error } = await db.from("inventory_products").insert(payload).select().single();
+        if (error) throw error;
+        productId = created.id;
+      }
+
+      // Reemplaza las variantes del producto por las que están en el formulario.
+      // Las ventas históricas no se pierden porque sale_items guarda el nombre vendido.
+      const { error: delError } = await db.from("inventory_variants").delete().eq("product_id", productId);
+      if (delError) throw delError;
+
+      if (variantsPayload.length) {
+        const rows = variantsPayload.map(v => ({
+          product_id: productId,
+          size: v.size,
+          stock: Number(v.stock || 0),
+          min_stock: Number(v.min_stock || 0),
+          price: v.price == null ? null : Number(v.price)
+        }));
+        const { error: varError } = await db.from("inventory_variants").insert(rows);
+        if (varError) throw varError;
+      }
     }, "Producto guardado.");
   };
 
@@ -3116,8 +3757,9 @@ function openProductModal(id = null) {
 function confirmDeleteProduct(id) {
   const p = getProduct(id);
   if (!p) return;
-  showConfirm("Eliminar producto", `¿Eliminar "${p.name}"?`, async () => {
+  showConfirm("Eliminar producto", `¿Eliminar "${p.name}"? También se eliminarán sus tallas/variantes.`, async () => {
     await safeAction(async () => {
+      await db.from("inventory_variants").delete().eq("product_id", id);
       const { error } = await db.from("inventory_products").delete().eq("id", id);
       if (error) throw error;
     }, "Producto eliminado.");
@@ -3125,11 +3767,12 @@ function confirmDeleteProduct(id) {
 }
 
 function openStockAdjustModal() {
+  const options = getInventorySaleOptions();
   document.getElementById("modalTitle").textContent = "Ajustar stock";
 
   document.getElementById("modalForm").innerHTML = `
-    <div class="form-group full"><label>Producto</label>
-      <select id="adjProd">${inventory.map(p => `<option value="${p.id}">${escape(p.name)} · stock: ${p.stock}</option>`).join("")}</select>
+    <div class="form-group full"><label>Producto / talla</label>
+      <select id="adjItem">${options.map(o => `<option value="${escape(o.key)}">${escape(o.label)} · stock: ${o.stock}</option>`).join("")}</select>
     </div>
     <div class="form-group full"><label>Nuevo stock</label><input type="number" id="adjStock" min="0" required></div>
     <div class="form-actions">
@@ -3139,25 +3782,47 @@ function openStockAdjustModal() {
 
   document.getElementById("modalForm").onsubmit = async e => {
     e.preventDefault();
+    const option = getSaleOptionByKey(document.getElementById("adjItem").value);
+    const newStock = Number(document.getElementById("adjStock").value);
+    if (!option || newStock < 0) {
+      showToast("Selecciona un producto y stock válido.", "error");
+      return;
+    }
 
     await safeAction(async () => {
-      const { error } = await db.from("inventory_products")
-        .update({ stock: Number(document.getElementById("adjStock").value) })
-        .eq("id", document.getElementById("adjProd").value);
-      if (error) throw error;
+      if (option.variant) {
+        const { error } = await db.from("inventory_variants").update({ stock: newStock }).eq("id", option.variant.id);
+        if (error) throw error;
+      } else {
+        const { error } = await db.from("inventory_products").update({ stock: newStock }).eq("id", option.product.id);
+        if (error) throw error;
+      }
+      await syncProductStockFromVariants(option.product.id);
     }, "Stock actualizado.");
   };
 
   openModal();
 }
 
+async function syncProductStockFromVariants(productId) {
+  const { data: variants, error } = await db.from("inventory_variants").select("stock,min_stock").eq("product_id", productId);
+  if (error) return;
+  if (!variants || !variants.length) return;
+  const stock = variants.reduce((a, v) => a + Number(v.stock || 0), 0);
+  const min_stock = variants.reduce((a, v) => a + Number(v.min_stock || 0), 0);
+  await db.from("inventory_products").update({ stock, min_stock }).eq("id", productId);
+}
+
 
 function renderSales(content, search) {
+  const selectedDate = filters.salesDate || getTodayIso();
   const list = sales.filter(s => {
     const products = (s.sale_items || []).map(i => i.product_name).join(" ");
     const haystack = [s.receipt_number, s.customer_name, s.method, getBranchName(s.branch_id), products].join(" ").toLowerCase();
+    const dateOk = selectedDate === "all" || isSameDay(s.date, selectedDate);
     return haystack.includes(search) &&
       filterByBranch(s) &&
+      dateOk &&
       (filters.saleMethod === "all" || s.method === filters.saleMethod);
   });
 
@@ -3174,10 +3839,14 @@ function renderSales(content, search) {
       <div class="card span-12">
         <div class="filters-bar">
           ${branchFilterHtml()}
+          <input class="filter-select" type="date" value="${selectedDate === "all" ? getTodayIso() : selectedDate}" onchange="setFilter('salesDate', this.value)">
+          <button class="btn btn-secondary btn-sm" onclick="setFilter('salesDate', getTodayIso())">Hoy</button>
+          <button class="btn btn-ghost btn-sm" onclick="setFilter('salesDate', 'all')">Ver todo</button>
           <select class="filter-select" onchange="setFilter('saleMethod', this.value)">
             <option value="all">Todos los métodos</option>
             ${PAYMENT_METHODS.map(m => `<option value="${m}" ${filters.saleMethod === m ? "selected" : ""}>${m}</option>`).join("")}
           </select>
+          <span class="small-text">${selectedDate === "all" ? "Mostrando todas las ventas" : `Ventas del ${formatDate(selectedDate)}`}</span>
         </div>
 
         <div class="table-wrapper scroll-table tall-scroll">
@@ -3214,38 +3883,38 @@ function renderSales(content, search) {
 
 let saleCart = [];
 
-function getCartItem(productId) {
-  return saleCart.find(i => i.product_id === productId);
+function getCartItem(key) {
+  return saleCart.find(i => i.key === key);
 }
 
 function getCartTotal() {
   return saleCart.reduce((sum, i) => sum + i.quantity * Number(i.price), 0);
 }
 
-function getProductRemainingStock(productId) {
-  const product = getProduct(productId);
-  if (!product) return 0;
-  const inCart = getCartItem(productId)?.quantity || 0;
-  return Number(product.stock) - inCart;
+function getSaleOptionRemainingStock(key) {
+  const option = getSaleOptionByKey(key);
+  if (!option) return 0;
+  const inCart = getCartItem(key)?.quantity || 0;
+  return Number(option.stock || 0) - inCart;
 }
 
 function addToCart() {
-  const productId = document.getElementById("saleProd")?.value;
+  const key = document.getElementById("saleProd")?.value;
   const qty = Number(document.getElementById("saleQty")?.value || 1);
-  const product = getProduct(productId);
+  const option = getSaleOptionByKey(key);
 
-  if (!product) return;
+  if (!option) return;
   if (qty < 1) {
     showToast("La cantidad debe ser al menos 1.", "error");
     return;
   }
 
-  const existing = getCartItem(productId);
+  const existing = getCartItem(key);
   const currentInCart = existing?.quantity || 0;
   const totalRequested = currentInCart + qty;
 
-  if (totalRequested > Number(product.stock)) {
-    showToast(`Stock insuficiente. Disponible: ${Number(product.stock) - currentInCart}.`, "error");
+  if (totalRequested > Number(option.stock)) {
+    showToast(`Stock insuficiente. Disponible: ${Number(option.stock) - currentInCart}.`, "error");
     return;
   }
 
@@ -3253,9 +3922,12 @@ function addToCart() {
     existing.quantity = totalRequested;
   } else {
     saleCart.push({
-      product_id: product.id,
-      product_name: product.name,
-      price: Number(product.price),
+      key,
+      product_id: option.product.id,
+      variant_id: option.variant?.id || null,
+      variant_label: option.variant ? getVariantLabel(option.variant) : null,
+      product_name: option.label,
+      price: Number(option.price),
       quantity: qty
     });
   }
@@ -3264,20 +3936,20 @@ function addToCart() {
   refreshSaleModalUI();
 }
 
-function updateCartItemQty(productId, newQty) {
-  const item = getCartItem(productId);
-  const product = getProduct(productId);
-  if (!item || !product) return;
+function updateCartItemQty(key, newQty) {
+  const item = getCartItem(key);
+  const option = getSaleOptionByKey(key);
+  if (!item || !option) return;
 
   const qty = Number(newQty);
   if (!qty || qty < 1) {
-    removeFromCart(productId);
+    removeFromCart(key);
     return;
   }
 
-  if (qty > Number(product.stock)) {
-    showToast(`Stock insuficiente. Máximo: ${product.stock}.`, "error");
-    item.quantity = Number(product.stock);
+  if (qty > Number(option.stock)) {
+    showToast(`Stock insuficiente. Máximo: ${option.stock}.`, "error");
+    item.quantity = Number(option.stock);
   } else {
     item.quantity = qty;
   }
@@ -3285,8 +3957,8 @@ function updateCartItemQty(productId, newQty) {
   refreshSaleModalUI();
 }
 
-function removeFromCart(productId) {
-  saleCart = saleCart.filter(i => i.product_id !== productId);
+function removeFromCart(key) {
+  saleCart = saleCart.filter(i => i.key !== key);
   refreshSaleModalUI();
 }
 
@@ -3296,7 +3968,7 @@ function clearCart() {
 
 function renderCartTable() {
   if (!saleCart.length) {
-    return `<div class="cart-empty">Carrito vacío. Selecciona un producto y haz clic en <strong>Añadir</strong>.</div>`;
+    return `<div class="cart-empty">Carrito vacío. Selecciona un producto/talla y haz clic en <strong>Añadir</strong>.</div>`;
   }
 
   return `
@@ -3312,10 +3984,10 @@ function renderCartTable() {
               <td class="num mono">${formatCurrency(i.price)}</td>
               <td class="num">
                 <input type="number" min="1" value="${i.quantity}" class="cart-qty-input"
-                  onchange="updateCartItemQty('${i.product_id}', this.value)">
+                  onchange="updateCartItemQty('${escape(i.key)}', this.value)">
               </td>
               <td class="num mono">${formatCurrency(i.price * i.quantity)}</td>
-              <td><button type="button" class="cart-remove-btn" onclick="removeFromCart('${i.product_id}')" title="Quitar">✕</button></td>
+              <td><button type="button" class="cart-remove-btn" onclick="removeFromCart('${escape(i.key)}')" title="Quitar">✕</button></td>
             </tr>
           `).join("")}
         </tbody>
@@ -3325,13 +3997,14 @@ function renderCartTable() {
 }
 
 function renderProductSelectOptions() {
-  const available = inventory.filter(p => getProductRemainingStock(p.id) > 0);
+  const available = getInventorySaleOptions().filter(o => getSaleOptionRemainingStock(o.key) > 0);
   if (!available.length) {
     return `<option value="">Sin productos disponibles</option>`;
   }
-  return available.map(p => {
-    const remaining = getProductRemainingStock(p.id);
-    return `<option value="${p.id}">${escape(p.name)} · ${formatCurrency(p.price)} · stock: ${remaining}</option>`;
+  return available.map(o => {
+    const remaining = getSaleOptionRemainingStock(o.key);
+    const price = Number(o.price || 0);
+    return `<option value="${escape(o.key)}">${escape(o.label)} · ${formatCurrency(price)} · stock: ${remaining}</option>`;
   }).join("");
 }
 
@@ -3369,7 +4042,7 @@ function refreshSaleModalUI() {
 }
 
 function openSaleModal() {
-  if (!inventory.some(p => Number(p.stock) > 0)) {
+  if (!getInventorySaleOptions().some(o => Number(o.stock) > 0)) {
     showToast("No hay productos con stock disponible.", "error");
     return;
   }
@@ -3382,7 +4055,7 @@ function openSaleModal() {
     <div class="form-group"><label>Cliente</label><input type="text" id="saleCust" required placeholder="Nombre del cliente" autocomplete="off"></div>
 
     <div class="form-group full">
-      <label>Agregar producto al carrito</label>
+      <label>Agregar producto/talla al carrito</label>
       <div class="cart-add-row">
         <select id="saleProd" class="cart-add-product">${renderProductSelectOptions()}</select>
         <input type="number" id="saleQty" min="1" value="1" class="cart-add-qty" placeholder="Cant.">
@@ -3424,9 +4097,30 @@ function toggleCashFields() {
 }
 
 function getNextReceiptNumber() {
-  const nums = sales.map(s => Number(String(s.receipt_number || "").replace(/\D/g, ""))).filter(Boolean);
-  const next = (nums.length ? Math.max(...nums) : 0) + 1;
-  return `B001-${String(next).padStart(6, "0")}`;
+  // Genera un número de boleta único sin depender de contar registros locales.
+  // Esto evita choques con la restricción UNIQUE de Supabase cuando hay ventas rápidas,
+  // doble clic, caché o varias pestañas abiertas.
+  const now = new Date();
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+    String(now.getSeconds()).padStart(2, "0"),
+    String(now.getMilliseconds()).padStart(3, "0")
+  ].join("");
+
+  let randomPart = Math.floor(Math.random() * 1000000);
+  try {
+    if (window.crypto?.getRandomValues) {
+      const arr = new Uint32Array(1);
+      window.crypto.getRandomValues(arr);
+      randomPart = arr[0] % 1000000;
+    }
+  } catch {}
+
+  return `B001-${stamp}-${String(randomPart).padStart(6, "0")}`;
 }
 
 function getCashBalanceForBranch(branchId) {
@@ -3437,8 +4131,26 @@ async function getFreshCashBalanceForBranch(branchId) {
   return getFreshDailyCashBalanceForBranch(branchId);
 }
 
+function resetSaleSavingState(submitBtn, label = "Registrar venta") {
+  isSavingSale = false;
+  if (submitBtn) {
+    submitBtn.disabled = false;
+    submitBtn.textContent = label;
+  }
+}
+
 async function saveSale(e) {
   e.preventDefault();
+
+  if (isSavingSale) return;
+  isSavingSale = true;
+
+  const submitBtn = e.target?.querySelector('button[type="submit"]');
+  const originalSubmitText = submitBtn?.textContent || "Registrar venta";
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Registrando...";
+  }
 
   const customerName = document.getElementById("saleCust").value.trim();
   const method = document.getElementById("saleMethod").value;
@@ -3448,16 +4160,19 @@ async function saveSale(e) {
 
   if (!customerName) {
     showToast("Ingresa el nombre del cliente.", "error");
+    resetSaleSavingState(submitBtn, originalSubmitText);
     return;
   }
   if (!saleCart.length) {
     showToast("El carrito está vacío. Agrega al menos un producto.", "error");
+    resetSaleSavingState(submitBtn, originalSubmitText);
     return;
   }
   for (const item of saleCart) {
-    const product = getProduct(item.product_id);
-    if (!product || item.quantity > Number(product.stock)) {
+    const option = getSaleOptionByKey(item.key);
+    if (!option || item.quantity > Number(option.stock)) {
       showToast(`Stock insuficiente para ${item.product_name}.`, "error");
+      resetSaleSavingState(submitBtn, originalSubmitText);
       return;
     }
   }
@@ -3465,6 +4180,7 @@ async function saveSale(e) {
 
   if (method === "Efectivo" && received < total) {
     showToast("El monto recibido no puede ser menor al total.", "error");
+    resetSaleSavingState(submitBtn, originalSubmitText);
     return;
   }
 
@@ -3473,11 +4189,13 @@ async function saveSale(e) {
       const availableCash = await getFreshCashBalanceForBranch(branchId);
       if (change > availableCash) {
         showToast(`No hay suficiente efectivo para dar vuelto. Caja disponible: ${formatCurrency(availableCash)} · Vuelto requerido: ${formatCurrency(change)}.`, "error");
+        resetSaleSavingState(submitBtn, originalSubmitText);
         return;
       }
     } catch (error) {
       console.error(error);
       showToast("No se pudo verificar el saldo de caja. Intenta nuevamente.", "error");
+      resetSaleSavingState(submitBtn, originalSubmitText);
       return;
     }
   }
@@ -3498,6 +4216,8 @@ async function saveSale(e) {
     const itemsPayload = saleCart.map(i => ({
       sale_id: sale.id,
       product_id: i.product_id,
+      variant_id: i.variant_id || null,
+      variant_label: i.variant_label || null,
       product_name: i.product_name,
       quantity: i.quantity,
       price: i.price,
@@ -3507,8 +4227,25 @@ async function saveSale(e) {
     const { error: itemError } = await db.from("sale_items").insert(itemsPayload);
     if (itemError) throw itemError;
 
+    for (const item of saleCart) {
+      if (item.variant_id) {
+        const variant = getVariant(item.variant_id);
+        const newStock = Math.max(Number(variant?.stock || 0) - Number(item.quantity || 0), 0);
+        const { error: vError } = await db.from("inventory_variants").update({ stock: newStock }).eq("id", item.variant_id);
+        if (vError) throw vError;
+        await syncProductStockFromVariants(item.product_id);
+      } else {
+        const product = getProduct(item.product_id);
+        const newStock = Math.max(Number(product?.stock || 0) - Number(item.quantity || 0), 0);
+        const { error: pError } = await db.from("inventory_products").update({ stock: newStock }).eq("id", item.product_id);
+        if (pError) throw pError;
+      }
+    }
+
     clearCart();
   }, "Venta registrada.");
+
+  resetSaleSavingState(submitBtn, originalSubmitText);
 }
 
 function printReceipt(id) {
